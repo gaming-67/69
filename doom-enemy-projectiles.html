@@ -1,0 +1,399 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Mini DOOM — Enemy Projectiles</title>
+<style>
+  html,body{margin:0;height:100%;overflow:hidden;background:#000}
+  canvas{display:block;width:100vw;height:100vh}
+  #hud{position:fixed;top:8px;left:8px;color:#fff;font-family:sans-serif;background:rgba(0,0,0,0.45);padding:6px 8px;border-radius:6px;font-size:14px}
+  .healthbar{position:fixed;bottom:10px;left:10px;width:220px;height:20px;background:#400;border:2px solid #800;border-radius:4px;overflow:hidden}
+  .healthbar-inner{height:100%;width:100%;background:#0f0;transform-origin:left center}
+  #ammo{margin-left:12px;color:#ffd}
+  #msg{position:fixed;top:8px;right:8px;color:#ddd;background:rgba(0,0,0,0.4);padding:6px 8px;border-radius:6px}
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<div id="hud">Mini DOOM — WASD to move, mouse to look, click to shoot <span id="ammo"></span></div>
+<div id="msg">Enemies will shoot at you — dodge their bullets!</div>
+<div class="healthbar"><div id="hp" class="healthbar-inner"></div></div>
+
+<script>
+(() => {
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  const hpBar = document.getElementById('hp');
+  const ammoLabel = document.getElementById('ammo');
+
+  let W = innerWidth, H = innerHeight;
+  function resize(){ W = innerWidth; H = innerHeight; canvas.width = W; canvas.height = H; }
+  window.addEventListener('resize', resize);
+  resize();
+
+  // simple map (grid of chars)
+  const map = [
+    "############",
+    "#..........#",
+    "#..##......#",
+    "#..##..##..#",
+    "#..####....#",
+    "#..........#",
+    "#..##......#",
+    "#..........#",
+    "############",
+  ];
+  const MAP_W = map[0].length, MAP_H = map.length, TILE = 64;
+  function isWall(x,y){
+    const mx = Math.floor(x / TILE), my = Math.floor(y / TILE);
+    if(mx < 0 || my < 0 || mx >= MAP_W || my >= MAP_H) return true;
+    return map[my][mx] === '#';
+  }
+
+  // player
+  const player = { x: 2.5 * TILE, y: 2.5 * TILE, a: 0, hp: 100, shootRequested: false };
+
+  // enemies
+  const enemies = [
+    { x: 6 * TILE, y: 5 * TILE, alive: true, hp: 60, shootCooldown: 0 },
+    { x: 9 * TILE, y: 2 * TILE, alive: true, hp: 70, shootCooldown: 0 }
+  ];
+
+  // bullets (both enemy and player)
+  const enemyBullets = [];
+  const playerBullets = [];
+
+  // input
+  const keys = {};
+  window.addEventListener('keydown', e => { keys[e.code] = true; /* don't prevent all */ });
+  window.addEventListener('keyup', e => { keys[e.code] = false; });
+  canvas.addEventListener('click', () => { canvas.requestPointerLock(); player.shootRequested = true; });
+  window.addEventListener('mousemove', e => { if (document.pointerLockElement === canvas) player.a += e.movementX * 0.002; });
+
+  // small helper: has line of sight via DDA raycast (returns true if no wall between)
+  function hasLineOfSight(x0,y0,x1,y1){
+    const ang = Math.atan2(y1-y0, x1-x0);
+    const sin = Math.sin(ang), cos = Math.cos(ang);
+    let dist = 0;
+    while(dist < 2000){
+      dist += 6;
+      const px = x0 + cos*dist, py = y0 + sin*dist;
+      if (isWall(px,py)) return false;
+      const dToTarget = Math.hypot(px - x1, py - y1);
+      if (dToTarget < 10) return true;
+    }
+    return false;
+  }
+
+  // shooting (player hitscan + visual bullet spawn)
+  function playerShoot(){
+    // spawn a visual projectile for flair and do hitscan damage along line
+    const angle = player.a;
+    playerBullets.push({ x: player.x + Math.cos(angle)*16, y: player.y + Math.sin(angle)*16, vx: Math.cos(angle)*1400, vy: Math.sin(angle)*1400, life: 0.7 });
+    // hitscan - check enemies
+    for (let e of enemies){
+      if (!e.alive) continue;
+      const dx = e.x - player.x, dy = e.y - player.y;
+      const dist = Math.hypot(dx,dy);
+      const angTo = Math.atan2(dy,dx);
+      let rel = angTo - angle;
+      rel = ((rel + Math.PI) % (2*Math.PI)) - Math.PI;
+      if (Math.abs(rel) < 0.25 && dist < 900 && hasLineOfSight(player.x,player.y,e.x,e.y)){
+        e.hp -= 34;
+        e.shootCooldown = Math.max(e.shootCooldown, 0.2); // small stun/flash effect
+        if (e.hp <= 0) e.alive = false;
+      }
+    }
+    player.shootRequested = false;
+  }
+
+  // enemy AI: move toward player and occasionally shoot
+  function updateEnemies(dt){
+    for (let e of enemies){
+      if (!e.alive) continue;
+      // approach
+      const dx = player.x - e.x, dy = player.y - e.y;
+      const d = Math.hypot(dx,dy);
+      const angTo = Math.atan2(dy,dx);
+      // movement: simple steering, avoid walls by small side step if blocked
+      const speed = 42;
+      const stepX = Math.cos(angTo)*speed*dt, stepY = Math.sin(angTo)*speed*dt;
+      if (!isWall(e.x + stepX, e.y + stepY)) { e.x += stepX; e.y += stepY; }
+      else { // small sidestep
+        const sx = Math.cos(angTo + Math.PI/2)*speed*dt, sy = Math.sin(angTo + Math.PI/2)*speed*dt;
+        if (!isWall(e.x + sx, e.y + sy)) { e.x += sx; e.y += sy; } else { e.x -= sx; e.y -= sy; }
+      }
+      // shooting: if player visible and within range and cooldown elapsed, fire projectile
+      e.shootCooldown -= dt;
+      if (d < 700 && e.shootCooldown <= 0 && hasLineOfSight(e.x,e.y,player.x,player.y)){
+        fireEnemyBullet(e, angTo);
+        e.shootCooldown = 1.0 + Math.random()*1.2; // cooldown
+      }
+    }
+  }
+
+  function fireEnemyBullet(enemy, angle){
+    // spawn a bullet moving toward the player's current position (slight inaccuracy)
+    const spread = (Math.random() - 0.5) * 0.12;
+    const a = angle + spread;
+    enemyBullets.push({
+      x: enemy.x + Math.cos(a)*18,
+      y: enemy.y + Math.sin(a)*18,
+      vx: Math.cos(a) * 420,
+      vy: Math.sin(a) * 420,
+      life: 3.0,
+      dmg: 12
+    });
+  }
+
+  // update bullets: move, collide with walls or player
+  function updateBullets(dt){
+    // enemy bullets
+    for (let i = enemyBullets.length - 1; i >= 0; i--){
+      const b = enemyBullets[i];
+      b.life -= dt;
+      b.x += b.vx * dt; b.y += b.vy * dt;
+      // hit wall?
+      if (isWall(b.x, b.y) || b.life <= 0){
+        enemyBullets.splice(i,1); continue;
+      }
+      // hit player?
+      const d = Math.hypot(b.x - player.x, b.y - player.y);
+      if (d < 16){
+        player.hp -= b.dmg;
+        if (player.hp < 0) player.hp = 0;
+        enemyBullets.splice(i,1);
+        continue;
+      }
+    }
+    // player bullets
+    for (let i = playerBullets.length - 1; i >= 0; i--){
+      const b = playerBullets[i];
+      b.life -= dt;
+      b.x += b.vx * dt; b.y += b.vy * dt;
+      if (isWall(b.x, b.y) || b.life <= 0){
+        playerBullets.splice(i,1); continue;
+      }
+      // hit enemy?
+      for (let e of enemies){
+        if (!e.alive) continue;
+        const d = Math.hypot(b.x - e.x, b.y - e.y);
+        if (d < 18){
+          e.hp -= 34;
+          if (e.hp <= 0) e.alive = false;
+          playerBullets.splice(i,1);
+          break;
+        }
+      }
+    }
+  }
+
+  // raycast (used by render to draw walls and by LOS)
+  const FOV = Math.PI/3, RAYS = 240;
+  function castRaysAndRender(){
+    // background
+    ctx.fillStyle = '#333'; ctx.fillRect(0,0,W,H/2);
+    ctx.fillStyle = '#000'; ctx.fillRect(0,H/2,W,H/2);
+
+    const plane = (W/2) / Math.tan(FOV/2);
+    const step = FOV / RAYS;
+    for (let r = 0; r < RAYS; r++){
+      const rayA = player.a - FOV/2 + r * step;
+      const sin = Math.sin(rayA), cos = Math.cos(rayA);
+      let dist = 0; let hit = false;
+      while (!hit && dist < 1400){
+        dist += 4;
+        const px = player.x + cos * dist, py = player.y + sin * dist;
+        if (isWall(px,py)) hit = true;
+      }
+      const corrected = dist * Math.cos(rayA - player.a);
+      const wallH = Math.min(H*2, (TILE * plane) / Math.max(0.0001, corrected));
+      const drawStart = Math.floor((H/2) - wallH/2);
+      // simple strip shading + alternating colors so walls look varied
+      const colorIndex = (Math.floor(r * 0.03) % 4 + 4) % 4;
+      const baseColors = ['#8b8b8b', '#8b6b4c', '#6b8b4c', '#6b6b8b'];
+      const col = baseColors[colorIndex];
+      const shade = Math.max(0.18, 1 - corrected / 1400) * ( ( (Math.floor(r*0.03) % 2) === 0 ) ? 1.0 : 0.88 );
+      ctx.fillStyle = shadeColor(col, shade);
+      const colW = W / RAYS;
+      ctx.fillRect(r * colW, drawStart, colW + 0.9, Math.max(1, Math.floor(wallH)));
+    }
+
+    // draw enemies as billboards (simple)
+    const sprites = [];
+    for (let e of enemies){
+      if (!e.alive) continue;
+      const dx = e.x - player.x, dy = e.y - player.y;
+      const dist = Math.hypot(dx,dy);
+      const angTo = Math.atan2(dy,dx);
+      let rel = angTo - player.a; rel = ((rel + Math.PI) % (2*Math.PI)) - Math.PI;
+      if (Math.abs(rel) > FOV/2 + 0.6) continue;
+      const rayHit = hasLineOfSight(player.x,player.y,e.x,e.y) ? true : false;
+      if (!rayHit) continue; // occluded by wall
+      const screenX = (0.5 * (1 + Math.tan(rel) / Math.tan(FOV/2))) * W;
+      const scale = Math.min(1.8, (TILE * plane) / Math.max(1, dist));
+      const spriteSize = Math.max(8, scale * 44);
+      sprites.push({ e, dist, screenX, spriteSize });
+    }
+    // sort back-to-front
+    sprites.sort((a,b)=>b.dist - a.dist);
+    for (let s of sprites){
+      const e = s.e;
+      const x = s.screenX - s.spriteSize/2, y = (H/2) - s.spriteSize/2;
+      // draw enemy square + small health bar above
+      ctx.fillStyle = '#cc4444';
+      ctx.fillRect(x, y, s.spriteSize, s.spriteSize);
+      const hpW = Math.max(0, (e.hp / 80)) * s.spriteSize;
+      ctx.fillStyle = '#0f0';
+      ctx.fillRect(x, y - 6, hpW, 4);
+      ctx.fillStyle = '#330';
+      ctx.fillRect(x + hpW, y - 6, s.spriteSize - hpW, 4);
+    }
+
+    // draw bullets (enemy)
+    for (let b of enemyBullets){
+      ctx.fillStyle = '#ffddaa';
+      const sx = projectToScreen(b.x, b.y);
+      if (sx) ctx.fillRect(sx - 2, H/2 - 2, 4, 4);
+    }
+    // player bullets (visual)
+    for (let b of playerBullets){
+      ctx.fillStyle = '#ffd';
+      const sx = projectToScreen(b.x, b.y);
+      if (sx) ctx.fillRect(sx - 2, H/2 - 2, 4, 4);
+    }
+
+    // crosshair
+    ctx.fillStyle = 'rgba(0,0,0,0.6)';
+    ctx.fillRect(W/2 - 1, H/2 - 12, 2, 24);
+    ctx.fillRect(W/2 - 12, H/2 - 1, 24, 2);
+
+    // minimap
+    drawMiniMap();
+  }
+
+  // project a world point to screen x if within view; returns null if behind
+  function projectToScreen(wx, wy){
+    const dx = wx - player.x, dy = wy - player.y;
+    const ang = Math.atan2(dy, dx);
+    let rel = ang - player.a; rel = ((rel + Math.PI) % (2*Math.PI)) - Math.PI;
+    if (Math.abs(rel) > FOV/2 + 0.4) return null;
+    const screenX = (0.5 * (1 + Math.tan(rel) / Math.tan(FOV/2))) * W;
+    return screenX;
+  }
+
+  function shadeColor(hex, factor){
+    const n = parseInt(hex.slice(1), 16);
+    const r = Math.max(0, Math.min(255, Math.floor(((n>>16)&255) * factor)));
+    const g = Math.max(0, Math.min(255, Math.floor(((n>>8)&255) * factor)));
+    const b = Math.max(0, Math.min(255, Math.floor((n&255) * factor)));
+    return `rgb(${r},${g},${b})`;
+  }
+
+  // minimap
+  function drawMiniMap(){
+    const scale = 0.15;
+    const pad = 10;
+    ctx.save();
+    ctx.translate(pad, pad);
+    ctx.scale(scale, scale);
+    ctx.fillStyle = 'rgba(0,0,0,0.6)';
+    ctx.fillRect(0,0, MAP_W * TILE, MAP_H * TILE);
+    // walls
+    ctx.fillStyle = '#999';
+    for (let y=0;y<MAP_H;y++){
+      for (let x=0;x<MAP_W;x++){
+        if (map[y][x] === '#') ctx.fillRect(x*TILE, y*TILE, TILE, TILE);
+      }
+    }
+    // enemies
+    for (let e of enemies){
+      if (!e.alive) continue;
+      ctx.fillStyle = '#f55';
+      ctx.beginPath(); ctx.arc(e.x, e.y, 10, 0, Math.PI*2); ctx.fill();
+    }
+    // player
+    ctx.fillStyle = '#ff0';
+    ctx.beginPath(); ctx.arc(player.x, player.y, 10, 0, Math.PI*2); ctx.fill();
+    ctx.strokeStyle = '#ff0';
+    ctx.beginPath(); ctx.moveTo(player.x, player.y); ctx.lineTo(player.x + Math.cos(player.a) * 40, player.y + Math.sin(player.a) * 40); ctx.stroke();
+    ctx.restore();
+  }
+
+  // movement (with A/D strafing) and collision
+  function updateMovement(dt){
+    const sp = 160 * dt;
+    const cos = Math.cos(player.a), sin = Math.sin(player.a);
+
+    // forward/back
+    if (keys['KeyW']) tryMove(cos * sp, sin * sp);
+    if (keys['KeyS']) tryMove(-cos * sp, -sin * sp);
+
+    // strafe left/right (A/D)
+    if (keys['KeyA']) tryMove(-sin * sp, cos * sp);
+    if (keys['KeyD']) tryMove(sin * sp, -cos * sp);
+
+    // optional turning with arrows
+    if (keys['ArrowLeft']) player.a -= 2.6 * dt;
+    if (keys['ArrowRight']) player.a += 2.6 * dt;
+  }
+
+  function tryMove(dx, dy){
+    // simple collision: move in x then y
+    if (!isWall(player.x + dx, player.y)) player.x += dx;
+    if (!isWall(player.x, player.y + dy)) player.y += dy;
+  }
+
+  // main update loop
+  let last = performance.now();
+  function loop(now){
+    const dt = Math.min(0.05, (now - last) / 1000);
+    last = now;
+
+    // movement
+    updateMovement(dt);
+
+    // player shooting request
+    if (player.shootRequested){
+      playerShoot();
+    }
+
+    // enemies: move + maybe shoot
+    updateEnemies(dt);
+
+    // bullets: move + collisions
+    updateBullets(dt);
+
+    // if player health at 0, respawn slowly
+    if (player.hp <= 0){
+      // simple death behaviour: fade / reset after short time
+      // immediate reset for simplicity
+      player.hp = 100;
+      player.x = 2.5 * TILE; player.y = 2.5 * TILE;
+      // revive all enemies
+      for (let e of enemies){ e.alive = true; e.hp = 60; e.shootCooldown = 0; }
+      enemyBullets.length = 0; playerBullets.length = 0;
+    }
+
+    // render
+    castRaysAndRender();
+
+    // HUD update
+    const hpPct = Math.max(0, Math.min(100, player.hp));
+    hpBar.style.transform = `scaleX(${hpPct/100})`;
+    ammoLabel.textContent = `Enemies: ${enemies.filter(e=>e.alive).length}`;
+
+    requestAnimationFrame(loop);
+  }
+
+  // start loop
+  requestAnimationFrame(loop);
+
+  // expose some debug
+  window.__mini = { enemies, enemyBullets, playerBullets, player };
+
+})();
+</script>
+</body>
+</html>
