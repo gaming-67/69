@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Mini Doom (Optimized Raycaster)</title>
+<style>
+  html,body{margin:0;height:100%;overflow:hidden;background:#111;color:#fff;font-family:system-ui;}
+  canvas{display:block;width:100vw;height:100vh;background:#000;}
+  #hud{position:fixed;top:8px;left:8px;padding:6px 10px;background:rgba(0,0,0,0.4);border-radius:6px;font-size:13px;}
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<div id="hud">Mini Doom — WASD/arrows to move, click to look</div>
+
+<script>
+(() => {
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d', { alpha:false });
+let W, H;
+function resize() {
+  W = window.innerWidth;
+  H = window.innerHeight;
+  canvas.width = W;
+  canvas.height = H;
+}
+window.addEventListener('resize', resize);
+resize();
+
+// Map definition
+const map = [
+  "################",
+  "#..............#",
+  "#..##....##....#",
+  "#..............#",
+  "#..####..####..#",
+  "#..............#",
+  "#..##....##....#",
+  "#..............#",
+  "################",
+];
+const MAP_W = map[0].length;
+const MAP_H = map.length;
+const TILE = 64;
+
+const player = { x: 2.5*TILE, y: 2.5*TILE, a: 0 };
+
+const keys = {};
+window.addEventListener("keydown", e => keys[e.code]=true);
+window.addEventListener("keyup", e => keys[e.code]=false);
+
+// Pointer lock for mouse look
+canvas.addEventListener("click", ()=>canvas.requestPointerLock());
+window.addEventListener("mousemove", e=>{
+  if (document.pointerLockElement===canvas) player.a += e.movementX*0.002;
+});
+
+function isWall(x, y) {
+  const mx = Math.floor(x/TILE), my = Math.floor(y/TILE);
+  if (mx<0||my<0||mx>=MAP_W||my>=MAP_H) return true;
+  return map[my][mx]==="#";
+}
+
+// Basic color palette for walls
+const wallColors = ["#884", "#484", "#488", "#844"];
+
+// Main render
+const FOV = Math.PI/3;
+const HALF_FOV = FOV/2;
+const RAYS = 240; // dynamic render width (lower = faster)
+function render() {
+  ctx.fillStyle = "#333";
+  ctx.fillRect(0,0,W,H/2);
+  ctx.fillStyle = "#111";
+  ctx.fillRect(0,H/2,W,H/2);
+
+  const step = FOV / RAYS;
+  const distProjPlane = (W/2)/Math.tan(HALF_FOV);
+
+  for (let ray=0; ray<RAYS; ray++){
+    const rayA = player.a - HALF_FOV + ray*step;
+    const sin = Math.sin(rayA), cos = Math.cos(rayA);
+
+    // DDA algorithm
+    let dist = 0;
+    let hit = false;
+    while(!hit && dist < 1024) {
+      dist += 4;
+      const x = player.x + cos*dist;
+      const y = player.y + sin*dist;
+      if (isWall(x,y)) {
+        hit = true;
+      }
+    }
+
+    const corrected = dist * Math.cos(rayA - player.a);
+    const wallH = Math.min(H, (TILE * distProjPlane) / corrected);
+    const color = wallColors[(Math.floor(ray*0.2)) % wallColors.length];
+    const shade = Math.max(0.3, 1 - corrected/800);
+    ctx.fillStyle = shadeColor(color, shade);
+    const colW = W/RAYS;
+    ctx.fillRect(ray*colW, (H-wallH)/2, colW+1, wallH);
+  }
+
+  // Crosshair
+  ctx.fillStyle="#fff";
+  ctx.fillRect(W/2-1, H/2-8, 2,16);
+  ctx.fillRect(W/2-8, H/2-1,16,2);
+}
+
+// Color shading helper
+function shadeColor(hex, percent) {
+  const num = parseInt(hex.slice(1),16);
+  const r = Math.floor(((num>>16)&255)*percent);
+  const g = Math.floor(((num>>8)&255)*percent);
+  const b = Math.floor((num&255)*percent);
+  return `rgb(${r},${g},${b})`;
+}
+
+// Movement
+const MOVE_SPEED = 160;
+const ROT_SPEED = 2.5;
+let last = performance.now();
+function loop(now){
+  const dt = (now - last)/1000;
+  last = now;
+
+  // Keyboard movement
+  if(keys["ArrowLeft"]) player.a -= ROT_SPEED*dt;
+  if(keys["ArrowRight"]) player.a += ROT_SPEED*dt;
+
+  const step = MOVE_SPEED*dt;
+  const dx = Math.cos(player.a)*step;
+  const dy = Math.sin(player.a)*step;
+
+  if(keys["KeyW"]||keys["ArrowUp"]) {
+    if(!isWall(player.x+dx,player.y)) player.x+=dx;
+    if(!isWall(player.x,player.y+dy)) player.y+=dy;
+  }
+  if(keys["KeyS"]||keys["ArrowDown"]) {
+    if(!isWall(player.x-dx,player.y)) player.x-=dx;
+    if(!isWall(player.x,player.y-dy)) player.y-=dy;
+  }
+  if(keys["KeyA"]) {
+    const dxs = Math.cos(player.a-Math.PI/2)*step;
+    const dys = Math.sin(player.a-Math.PI/2)*step;
+    if(!isWall(player.x+dxs,player.y)) player.x+=dxs;
+    if(!isWall(player.x,player.y+dys)) player.y+=dys;
+  }
+  if(keys["KeyD"]) {
+    const dxs = Math.cos(player.a+Math.PI/2)*step;
+    const dys = Math.sin(player.a+Math.PI/2)*step;
+    if(!isWall(player.x+dxs,player.y)) player.x+=dxs;
+    if(!isWall(player.x,player.y+dys)) player.y+=dys;
+  }
+
+  render();
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
