@@ -1,0 +1,210 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Mini DOOM</title>
+<style>
+html,body { margin:0; height:100%; overflow:hidden; background:#000; }
+canvas { display:block; width:100vw; height:100vh; background:#000; }
+#hud { position:fixed; top:8px; left:8px; color:#fff; font-family:sans-serif; background:rgba(0,0,0,0.4); padding:4px 8px; border-radius:6px; font-size:14px;}
+.touch-controls { position:fixed; bottom:10px; left:10px; right:10px; display:flex; justify-content:space-between; pointer-events:auto; }
+.btn { width:60px; height:60px; border-radius:50%; background:rgba(255,255,255,0.2); border:2px solid rgba(255,255,255,0.5); }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<div id="hud">Mini DOOM — WASD/arrows to move, click to look, click to shoot</div>
+
+<!-- Touch controls -->
+<div class="touch-controls" id="touch" style="display:none;">
+  <div>
+    <div class="btn" id="btn-left"></div>
+    <div class="btn" id="btn-right"></div>
+  </div>
+  <div>
+    <div class="btn" id="btn-up"></div>
+    <div class="btn" id="btn-down"></div>
+    <div class="btn" id="btn-fire"></div>
+  </div>
+</div>
+
+<script>
+(() => {
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+let W, H;
+function resize() {
+  W = window.innerWidth;
+  H = window.innerHeight;
+  canvas.width = W;
+  canvas.height = H;
+}
+resize();
+window.addEventListener('resize', resize);
+
+// Map
+const map = [
+  "############",
+  "#..........#",
+  "#..##......#",
+  "#..........#",
+  "#..####....#",
+  "#..........#",
+  "#..##......#",
+  "#..........#",
+  "############",
+];
+const MAP_W = map[0].length;
+const MAP_H = map.length;
+const TILE = 64;
+
+function isWall(x, y) {
+  const mx = Math.floor(x/TILE), my = Math.floor(y/TILE);
+  if(mx<0||my<0||mx>=MAP_W||my>=MAP_H) return true;
+  return map[my][mx]==='#';
+}
+
+// Player
+const player = { x: 2.5*TILE, y: 2.5*TILE, a: 0, shoot:false };
+
+// Enemies
+const enemies = [
+  { x:5*TILE, y:5*TILE, alive:true },
+  { x:8*TILE, y:2*TILE, alive:true }
+];
+
+// Keys + mouse
+const keys = {};
+window.addEventListener('keydown', e=>keys[e.code]=true);
+window.addEventListener('keyup', e=>keys[e.code]=false);
+
+canvas.addEventListener('click', ()=>{
+  canvas.requestPointerLock();
+  player.shoot = true;
+});
+window.addEventListener('mousemove', e=>{
+  if(document.pointerLockElement===canvas){
+    player.a += e.movementX*0.002;
+  }
+});
+
+// Touch controls
+const touch = document.getElementById('touch');
+if ('ontouchstart' in window) {
+  touch.style.display='flex';
+  function press(id, key){ 
+    const el=document.getElementById(id);
+    el.addEventListener('touchstart', e=>{ e.preventDefault(); keys[key]=true; });
+    el.addEventListener('touchend', e=>{ e.preventDefault(); keys[key]=false; });
+  }
+  press('btn-up','KeyW'); press('btn-down','KeyS'); 
+  press('btn-left','ArrowLeft'); press('btn-right','ArrowRight'); 
+  press('btn-fire','Space');
+}
+
+// Textures (simple color patterns)
+const textures = ["#888","#884","#484","#448","#844"];
+
+// Raycasting
+const FOV = Math.PI/3;
+const RAYS = 240;
+function shade(hex, s){
+  const n=parseInt(hex.slice(1),16);
+  const r=Math.floor(((n>>16)&255)*s);
+  const g=Math.floor(((n>>8)&255)*s);
+  const b=Math.floor((n&255)*s);
+  return `rgb(${r},${g},${b})`;
+}
+
+// Shooting check
+function shoot() {
+  for (let e of enemies) {
+    if(!e.alive) continue;
+    const dx=e.x-player.x, dy=e.y-player.y;
+    const dist=Math.hypot(dx,dy);
+    const angle=Math.atan2(dy,dx);
+    const diff=Math.abs(((angle-player.a+Math.PI*3)%(Math.PI*2))-Math.PI);
+    if(diff<0.2 && dist<400){ e.alive=false; }
+  }
+  player.shoot=false;
+}
+
+// Draw
+function render() {
+  ctx.fillStyle='#333'; ctx.fillRect(0,0,W,H/2);
+  ctx.fillStyle='#000'; ctx.fillRect(0,H/2,W,H/2);
+  const step=FOV/RAYS;
+  const projPlane=(W/2)/Math.tan(FOV/2);
+  for(let r=0;r<RAYS;r++){
+    const rayA=player.a-FOV/2+r*step;
+    const sin=Math.sin(rayA), cos=Math.cos(rayA);
+    let dist=0; let hit=false;
+    while(!hit&&dist<800){
+      dist+=4;
+      const x=player.x+cos*dist, y=player.y+sin*dist;
+      if(isWall(x,y)) hit=true;
+    }
+    const corrected=dist*Math.cos(rayA-player.a);
+    const wallH=(TILE*projPlane)/corrected;
+    const c=textures[r%textures.length];
+    const shadeF=Math.max(0.3,1-corrected/800);
+    ctx.fillStyle=shade(c,shadeF);
+    const colW=W/RAYS;
+    ctx.fillRect(r*colW,(H-wallH)/2,colW+1,wallH);
+  }
+  // Enemies
+  for(let e of enemies){
+    if(!e.alive) continue;
+    const dx=e.x-player.x, dy=e.y-player.y;
+    const dist=Math.hypot(dx,dy);
+    const angle=Math.atan2(dy,dx)-player.a;
+    if(angle>-FOV/2&&angle<FOV/2){
+      const size=4000/(dist);
+      const x=W/2+(angle*(W/FOV))-size/2;
+      const y=H/2-size/2;
+      ctx.fillStyle='red';
+      ctx.fillRect(x,y,size,size);
+    }
+  }
+  // Crosshair
+  ctx.fillStyle="#fff";
+  ctx.fillRect(W/2-1,H/2-8,2,16);
+  ctx.fillRect(W/2-8,H/2-1,16,2);
+}
+
+function move(dt){
+  const speed=150*dt;
+  if(keys['ArrowLeft']) player.a -= 2*dt;
+  if(keys['ArrowRight']) player.a += 2*dt;
+  const dx=Math.cos(player.a)*speed, dy=Math.sin(player.a)*speed;
+  if(keys['KeyW']) {
+    if(!isWall(player.x+dx,player.y)) player.x+=dx;
+    if(!isWall(player.x,player.y+dy)) player.y+=dy;
+  }
+  if(keys['KeyS']) {
+    if(!isWall(player.x-dx,player.y)) player.x-=dx;
+    if(!isWall(player.x,player.y-dy)) player.y-=dy;
+  }
+  // Enemies follow
+  for(let e of enemies){
+    if(!e.alive) continue;
+    const dx=e.x-player.x, dy=e.y-player.y;
+    const dist=Math.hypot(dx,dy);
+    if(dist>60){ e.x -= (dx/dist)*60*dt; e.y -= (dy/dist)*60*dt; }
+  }
+}
+
+let last=performance.now();
+function loop(now){
+  const dt=(now-last)/1000; last=now;
+  move(dt);
+  if(keys['Space']||player.shoot) shoot();
+  render();
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
