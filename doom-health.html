@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Mini DOOM with Health</title>
+<style>
+html,body { margin:0; height:100%; overflow:hidden; background:#000; }
+canvas { display:block; width:100vw; height:100vh; background:#000; }
+#hud {
+  position:fixed; top:8px; left:8px;
+  color:#fff; font-family:sans-serif;
+  background:rgba(0,0,0,0.4);
+  padding:4px 8px; border-radius:6px; font-size:14px;
+}
+.healthbar {
+  position:fixed; bottom:10px; left:10px;
+  width:200px; height:20px;
+  background:#400; border:2px solid #800;
+}
+.healthbar-inner {
+  height:100%; width:100%; background:#0f0;
+}
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<div id="hud">Mini DOOM — WASD to move, click to shoot</div>
+<div class="healthbar"><div id="hp" class="healthbar-inner"></div></div>
+
+<script>
+(() => {
+const canvas=document.getElementById('game');
+const ctx=canvas.getContext('2d');
+const hpBar=document.getElementById('hp');
+
+let W,H;
+function resize(){W=innerWidth;H=innerHeight;canvas.width=W;canvas.height=H;}
+resize();window.addEventListener('resize',resize);
+
+// Map
+const map=[
+"############",
+"#..........#",
+"#..##......#",
+"#..........#",
+"#..####....#",
+"#..........#",
+"#..##......#",
+"#..........#",
+"############",
+];
+const MAP_W=map[0].length,MAP_H=map.length,TILE=64;
+function isWall(x,y){
+  const mx=Math.floor(x/TILE),my=Math.floor(y/TILE);
+  return mx<0||my<0||mx>=MAP_W||my>=MAP_H||map[my][mx]==='#';
+}
+
+// Player
+const player={x:2.5*TILE,y:2.5*TILE,a:0,shoot:false,hp:100};
+
+// Enemies
+const enemies=[
+  {x:6*TILE,y:5*TILE,alive:true,hp:60},
+  {x:8*TILE,y:2*TILE,alive:true,hp:60},
+];
+
+// Input
+const keys={};
+onkeydown=e=>keys[e.code]=true;
+onkeyup=e=>keys[e.code]=false;
+canvas.addEventListener('click',()=>{canvas.requestPointerLock();player.shoot=true;});
+onmousemove=e=>{if(document.pointerLockElement===canvas)player.a+=e.movementX*0.002;};
+
+// Colors
+const textures=["#888","#884","#484","#448","#844"];
+function shade(hex,s){const n=parseInt(hex.slice(1),16);const r=((n>>16)&255)*s,g=((n>>8)&255)*s,b=(n&255)*s;return`rgb(${r|0},${g|0},${b|0})`;}
+
+// Shooting
+function shoot(){
+  for(let e of enemies){
+    if(!e.alive)continue;
+    const dx=e.x-player.x,dy=e.y-player.y,dist=Math.hypot(dx,dy);
+    const angle=Math.atan2(dy,dx);
+    const diff=Math.abs(((angle-player.a+Math.PI*3)%(Math.PI*2))-Math.PI);
+    if(diff<0.2&&dist<400){ e.hp-=30; if(e.hp<=0)e.alive=false; }
+  }
+  player.shoot=false;
+}
+
+// Raycast render
+const FOV=Math.PI/3,RAYS=240;
+function render(){
+  ctx.fillStyle='#333';ctx.fillRect(0,0,W,H/2);
+  ctx.fillStyle='#000';ctx.fillRect(0,H/2,W,H/2);
+  const step=FOV/RAYS,plane=(W/2)/Math.tan(FOV/2);
+  for(let r=0;r<RAYS;r++){
+    const rayA=player.a-FOV/2+r*step,sin=Math.sin(rayA),cos=Math.cos(rayA);
+    let dist=0,hit=false;
+    while(!hit&&dist<800){dist+=4;if(isWall(player.x+cos*dist,player.y+sin*dist))hit=true;}
+    const corrected=dist*Math.cos(rayA-player.a);
+    const h=(TILE*plane)/corrected;
+    const c=textures[r%textures.length];
+    ctx.fillStyle=shade(c,Math.max(0.3,1-corrected/800));
+    const w=W/RAYS;
+    ctx.fillRect(r*w,(H-h)/2,w+1,h);
+  }
+  // Enemies (3D)
+  for(let e of enemies){
+    if(!e.alive)continue;
+    const dx=e.x-player.x,dy=e.y-player.y,dist=Math.hypot(dx,dy);
+    const angle=Math.atan2(dy,dx)-player.a;
+    if(angle>-FOV/2&&angle<FOV/2){
+      const size=4000/dist;
+      const x=W/2+(angle*(W/FOV))-size/2,y=H/2-size/2;
+      ctx.fillStyle='red';
+      ctx.fillRect(x,y,size,size);
+    }
+  }
+  // Crosshair
+  ctx.fillStyle='#fff';
+  ctx.fillRect(W/2-1,H/2-8,2,16);
+  ctx.fillRect(W/2-8,H/2-1,16,2);
+  drawMiniMap();
+}
+
+// Movement
+function move(dt){
+  const speed=150*dt,rotSpeed=2*dt;
+  if(keys['ArrowLeft'])player.a-=rotSpeed;
+  if(keys['ArrowRight'])player.a+=rotSpeed;
+  const cos=Math.cos(player.a),sin=Math.sin(player.a);
+
+  // Forward/back
+  if(keys['KeyW'])tryMove(cos*speed,sin*speed);
+  if(keys['KeyS'])tryMove(-cos*speed,-sin*speed);
+  // Strafe left/right
+  if(keys['KeyA'])tryMove(-sin*speed,cos*speed);
+  if(keys['KeyD'])tryMove(sin*speed,-cos*speed);
+
+  // Enemies move toward player
+  for(let e of enemies){
+    if(!e.alive)continue;
+    const dx=e.x-player.x,dy=e.y-player.y,dist=Math.hypot(dx,dy);
+    if(dist>60){e.x-=(dx/dist)*60*dt;e.y-=(dy/dist)*60*dt;}
+    else { player.hp -= 15*dt; if(player.hp<0)player.hp=0; }
+  }
+}
+
+function tryMove(dx,dy){
+  if(!isWall(player.x+dx,player.y))player.x+=dx;
+  if(!isWall(player.x,player.y+dy))player.y+=dy;
+}
+
+// Mini-map
+function drawMiniMap(){
+  const scale=0.15;
+  ctx.save();
+  ctx.translate(10,10);
+  ctx.scale(scale,scale);
+  ctx.fillStyle='rgba(0,0,0,0.6)';
+  ctx.fillRect(0,0,MAP_W*TILE,MAP_H*TILE);
+  ctx.fillStyle='#666';
+  for(let y=0;y<MAP_H;y++)for(let x=0;x<MAP_W;x++)if(map[y][x]==='#')ctx.fillRect(x*TILE,y*TILE,TILE,TILE);
+  for(let e of enemies){if(!e.alive)continue;ctx.fillStyle='red';ctx.beginPath();ctx.arc(e.x,e.y,10,0,Math.PI*2);ctx.fill();}
+  ctx.fillStyle='yellow';
+  ctx.beginPath();ctx.arc(player.x,player.y,10,0,Math.PI*2);ctx.fill();
+  ctx.strokeStyle='yellow';
+  ctx.beginPath();
+  ctx.moveTo(player.x,player.y);
+  ctx.lineTo(player.x+Math.cos(player.a)*40,player.y+Math.sin(player.a)*40);
+  ctx.stroke();
+  ctx.restore();
+}
+
+// Main loop
+let last=performance.now();
+function loop(now){
+  const dt=(now-last)/1000;last=now;
+  move(dt);
+  if(keys['Space']||player.shoot)shoot();
+  render();
+  hpBar.style.width=Math.max(0,player.hp)+'%';
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
