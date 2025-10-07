@@ -1,0 +1,535 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"/>
+<title>Mini Doom — Textures + Enemies + Touch</title>
+<style>
+  :root { --bg:#0c0c0d; --panel: rgba(0,0,0,0.45); --accent:#ffcc22; }
+  html,body{height:100%;margin:0;background:var(--bg);color:#ddd;font-family:Inter,system-ui,Arial;}
+  canvas{display:block;width:100vw;height:100vh;touch-action:none;background:#000;}
+  #ui{position:fixed;left:10px;top:10px;z-index:40;background:var(--panel);padding:8px 10px;border-radius:8px;font-size:13px}
+  #ui small{display:block;color:#bbb;margin-top:4px}
+  #minimapToggle{margin-left:8px}
+  #hud-right { position:fixed; right:10px; top:10px; z-index:40; background:var(--panel); padding:8px 10px; border-radius:8px; font-size:13px }
+  #touch-left, #touch-right {
+    position:fixed; bottom:18px; z-index:50; touch-action:none;
+    -webkit-user-select:none; user-select:none;
+  }
+  #touch-left { left:18px; width:140px; height:140px; }
+  #touch-right { right:18px; width:140px; height:140px; display:flex; align-items:center; justify-content:center; }
+  .joystick-base{ width:100%; height:100%; border-radius:50%; background: rgba(255,255,255,0.04); display:flex; align-items:center; justify-content:center; }
+  .joystick-thumb{ width:44px; height:44px; border-radius:50%; background: rgba(255,255,255,0.12); transform: translate(0,0); }
+  .fire-btn{ width:84px; height:84px; border-radius:50%; background: linear-gradient(180deg, rgba(255,80,50,0.95), rgba(200,40,10,0.95)); display:flex; align-items:center; justify-content:center; color:#fff; font-weight:700; box-shadow:0 6px 20px rgba(0,0,0,0.5); }
+  .small-btn { padding:6px 8px; margin-left:6px; background:rgba(255,255,255,0.06); border-radius:6px; cursor:pointer; color:#ddd }
+  #fps { font-variant-numeric: tabular-nums; color:#9fd; }
+  @media (pointer: coarse) {
+    #ui, #hud-right { font-size:14px }
+  }
+</style>
+</head>
+<body>
+<div id="ui">
+  <strong>Mini Doom — Full Build</strong>
+  <div style="margin-top:6px">WASD / Arrows: move · Click canvas to look · Mouse click or Space = shoot</div>
+  <small>Touch: left joystick = move · drag right = look/turn · Fire button = shoot · M = toggle minimap · R = reset</small>
+</div>
+<div id="hud-right"><span id="hp">HP: 100</span> <span class="small-btn" id="minimapToggle">M</span> <span class="small-btn" id="resetBtn">R</span> <span id="fps">— FPS</span></div>
+
+<canvas id="c"></canvas>
+
+<!-- touch controls -->
+<div id="touch-left" style="display:none">
+  <div class="joystick-base" id="joyBase">
+    <div class="joystick-thumb" id="joyThumb"></div>
+  </div>
+</div>
+<div id="touch-right" style="display:none">
+  <div class="fire-btn" id="fireBtn">FIRE</div>
+</div>
+
+<script>
+(() => {
+  // ==== Config ====
+  const TILE = 64;
+  const MAP = [
+    "################",
+    "#..............#",
+    "#..##....##....#",
+    "#..##....##....#",
+    "#..#..........##",
+    "#..####..####..#",
+    "#..#........#..#",
+    "#..#..##....#..#",
+    "#..#..##....#..#",
+    "#..#........#..#",
+    "#..####..####..#",
+    "#..............#",
+    "#.....##.......#",
+    "#..............#",
+    "#..............#",
+    "################",
+  ];
+  const MAP_W = MAP[0].length;
+  const MAP_H = MAP.length;
+  const FOV = Math.PI / 3; // 60deg
+  const HALF_FOV = FOV/2;
+  const MAX_VIEW_DIST = 1600;
+  const BASE_RAYS = 320; // desktop default (adaptive)
+  const MOBILE_RAYS = 160;
+
+  // ==== Canvas / resize ====
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d', { alpha:false });
+  let W=800, H=600;
+  function resize(){
+    W = window.innerWidth; H = window.innerHeight;
+    canvas.width = Math.max(320, Math.floor(W));
+    canvas.height = Math.max(240, Math.floor(H));
+    canvas.style.width = `${W}px`;
+    canvas.style.height = `${H}px`;
+    // adapt rays for performance (device & size)
+    if (isMobile()) rays = MOBILE_RAYS;
+    else rays = Math.max(160, Math.floor(BASE_RAYS * Math.min(1, W/1280)));
+  }
+  window.addEventListener('resize', resize);
+  resize();
+
+  // ==== Player ====
+  const player = { x: TILE*3.5, y: TILE*3.5, ang: 0.6, hp: 100 };
+
+  // ==== Input ====
+  const keys = {};
+  window.addEventListener('keydown', e => {
+    keys[e.code] = true;
+    if (e.code === 'KeyM') toggleMinimap();
+    if (e.code === 'KeyR') resetLevel();
+    if (e.code === 'Space') shoot();
+  });
+  window.addEventListener('keyup', e => keys[e.code] = false);
+
+  // Pointer lock
+  canvas.addEventListener('click', ()=> {
+    if (document.pointerLockElement !== canvas) canvas.requestPointerLock?.();
+  });
+  window.addEventListener('mousemove', e => {
+    if (document.pointerLockElement === canvas) player.ang += e.movementX * 0.0025;
+  });
+
+  // Touch UI elements
+  const touchLeftDiv = document.getElementById('touch-left');
+  const touchRightDiv = document.getElementById('touch-right');
+  const joyBase = document.getElementById('joyBase');
+  const joyThumb = document.getElementById('joyThumb');
+  const fireBtn = document.getElementById('fireBtn');
+  let touchMove = { x:0, y:0, active:false };
+  function isMobile(){
+    return navigator.maxTouchPoints && navigator.maxTouchPoints > 0 || /Mobi|Android/i.test(navigator.userAgent);
+  }
+  if (isMobile()) {
+    touchLeftDiv.style.display = 'block';
+    touchRightDiv.style.display = 'block';
+  }
+
+  // joystick touch handling
+  let joyCenter = null;
+  function updateJoyThumb(x,y){
+    const rect = joyBase.getBoundingClientRect();
+    const cx = rect.left + rect.width/2, cy = rect.top + rect.height/2;
+    const dx = Math.max(-1, Math.min(1, (x-cx)/(rect.width/2)));
+    const dy = Math.max(-1, Math.min(1, (y-cy)/(rect.height/2)));
+    joyThumb.style.transform = `translate(${dx*36}px,${dy*36}px)`;
+    touchMove.x = dx; touchMove.y = dy; touchMove.active = true;
+  }
+  function resetJoy(){ joyThumb.style.transform = `translate(0,0)`; touchMove.active = false; touchMove.x = 0; touchMove.y = 0; }
+  joyBase.addEventListener('touchstart', e => { e.preventDefault(); const t = e.touches[0]; updateJoyThumb(t.clientX, t.clientY); });
+  joyBase.addEventListener('touchmove', e => { e.preventDefault(); const t = e.touches[0]; updateJoyThumb(t.clientX, t.clientY); });
+  joyBase.addEventListener('touchend', e => { e.preventDefault(); resetJoy(); });
+
+  // right side: dragging to look/turn
+  let lastTouchLookX = null;
+  touchRightDiv.addEventListener('touchstart', e => { e.preventDefault(); lastTouchLookX = e.touches[0].clientX; });
+  touchRightDiv.addEventListener('touchmove', e => { e.preventDefault(); const t = e.touches[0]; const dx = t.clientX - (lastTouchLookX ?? t.clientX); player.ang += dx * 0.007; lastTouchLookX = t.clientX; });
+  touchRightDiv.addEventListener('touchend', e => { e.preventDefault(); lastTouchLookX = null; });
+
+  // fire
+  fireBtn.addEventListener('click', shoot);
+  fireBtn.addEventListener('touchstart', e => { e.preventDefault(); shoot(); });
+
+  // UI buttons
+  document.getElementById('minimapToggle').addEventListener('click', toggleMinimap);
+  document.getElementById('resetBtn').addEventListener('click', resetLevel);
+  let showMinimap = true;
+  function toggleMinimap(){ showMinimap = !showMinimap; }
+
+  // ==== Textures (prebuilt offscreen canvases) ====
+  function makeTexture(seedColor, patternFn){
+    const t = document.createElement('canvas');
+    t.width = 64; t.height = 64;
+    const g = t.getContext('2d');
+    g.fillStyle = seedColor; g.fillRect(0,0,64,64);
+    patternFn(g);
+    // subtle noise
+    const img = g.getImageData(0,0,64,64);
+    for(let i=0;i<img.data.length;i+=4){
+      const v = (Math.random()-0.5)*12;
+      img.data[i] = Math.max(0, Math.min(255, img.data[i]+v));
+      img.data[i+1] = Math.max(0, Math.min(255, img.data[i+1]+v));
+      img.data[i+2] = Math.max(0, Math.min(255, img.data[i+2]+v));
+    }
+    g.putImageData(img,0,0);
+    return t;
+  }
+  const textures = [
+    makeTexture('#8b5e3c', g => { g.fillStyle='rgba(0,0,0,0.08)'; for(let y=0;y<8;y++){ for(let x=0;x<8;x++){ if((x+y)%2) g.fillRect(x*8,y*8,8,8); } } }),
+    makeTexture('#6b8b3c', g => { for(let i=0;i<24;i++){ g.fillRect(Math.random()*64, Math.random()*64, 2,2); } }),
+    makeTexture('#6b7c8b', g => { g.beginPath(); for(let i=0;i<6;i++){ g.moveTo(0,i*10); g.lineTo(64,i*10+4); } g.strokeStyle='rgba(0,0,0,0.06)'; g.lineWidth=1; g.stroke(); }),
+    makeTexture('#7c3c6b', g => { g.fillStyle='rgba(255,255,255,0.03)'; for(let i=0;i<12;i++) g.fillRect(i*5, (i*11)%64, 2,8); })
+  ];
+
+  // ==== Map helpers / DDA ====
+  function mapAt(mx,my){ if(mx<0||my<0||mx>=MAP_W||my>=MAP_H) return '#'; return MAP[my][mx]; }
+  function isWallAtWorld(x,y){ return mapAt(Math.floor(x/TILE), Math.floor(y/TILE)) === '#'; }
+
+  // DDA: returns {dist, side (0 vert /1 horiz), texX, texIndex, hitX, hitY}
+  function castRay(originX, originY, angle){
+    // normalize
+    let a = angle % (Math.PI*2); if (a < 0) a += Math.PI*2;
+    const sin = Math.sin(a), cos = Math.cos(a);
+    let mapX = Math.floor(originX / TILE), mapY = Math.floor(originY / TILE);
+    const deltaDistX = Math.abs(1 / cos);
+    const deltaDistY = Math.abs(1 / sin);
+    let stepX, stepY;
+    let sideDistX, sideDistY;
+
+    if (cos < 0) {
+      stepX = -1;
+      sideDistX = (originX - mapX * TILE) * deltaDistX / TILE;
+    } else {
+      stepX = 1;
+      sideDistX = ((mapX+1)*TILE - originX) * deltaDistX / TILE;
+    }
+    if (sin < 0) {
+      stepY = -1;
+      sideDistY = (originY - mapY * TILE) * deltaDistY / TILE;
+    } else {
+      stepY = 1;
+      sideDistY = ((mapY+1)*TILE - originY) * deltaDistY / TILE;
+    }
+
+    let hit=false, side=0;
+    let safety = 0;
+    while (!hit && safety++ < 2048) {
+      if (sideDistX < sideDistY) {
+        sideDistX += deltaDistX / TILE;
+        mapX += stepX; side = 0;
+      } else {
+        sideDistY += deltaDistY / TILE;
+        mapY += stepY; side = 1;
+      }
+      if (mapAt(mapX,mapY) === '#') hit = true;
+    }
+    let hitX, hitY, perpDist;
+    if (hit) {
+      if (side === 0) {
+        const xHit = mapX * TILE + (stepX === -1 ? TILE : 0);
+        const t = (xHit - originX) / cos;
+        hitX = originX + cos * t; hitY = originY + sin * t;
+        perpDist = Math.abs((hitX - originX) / cos);
+      } else {
+        const yHit = mapY * TILE + (stepY === -1 ? TILE : 0);
+        const t = (yHit - originY) / sin;
+        hitX = originX + cos * t; hitY = originY + sin * t;
+        perpDist = Math.abs((hitY - originY) / sin);
+      }
+      // texture X (0..textureWidth-1)
+      let coord = (side === 0) ? (hitY % TILE) : (hitX % TILE);
+      if ((side === 0 && cos > 0) || (side === 1 && sin < 0)) coord = TILE - coord;
+      const texX = Math.floor((coord / TILE) * textures[0].width);
+      const texIndex = ((mapY*17 + mapX*13) % textures.length + textures.length) % textures.length;
+      return { dist: perpDist, side, texX, texIndex, hitX, hitY, mapX, mapY };
+    } else {
+      return { dist: 1e6, side:0, texX:0, texIndex:0, hitX: originX + cos*1e6, hitY: originY + sin*1e6 };
+    }
+  }
+
+  // ==== Enemies ====
+  let enemies = [];
+  function spawnEnemies(){
+    enemies = [];
+    // simple predefined spawns
+    const spawns = [ [8.5,6.5],[12.5,3.5],[6.5,10.5],[10.5,12.5] ];
+    for (let s of spawns){
+      enemies.push({ x: s[0]*TILE, y: s[1]*TILE, hp: 60, speed: 36 + Math.random()*30, alive:true, lastHit:0 });
+    }
+  }
+  spawnEnemies();
+
+  function resetLevel(){
+    player.x = TILE*3.5; player.y = TILE*3.5; player.ang = 0.6; player.hp = 100;
+    spawnEnemies();
+  }
+
+  // enemy AI update
+  function updateEnemies(dt){
+    for (let e of enemies){
+      if (!e.alive) continue;
+      const dx = player.x - e.x, dy = player.y - e.y;
+      const d = Math.hypot(dx,dy);
+      // if has line of sight and within chase radius, move toward player
+      if (d < 600 && hasLineOfSight(e.x,e.y,player.x,player.y)){
+        const angToP = Math.atan2(dy,dx);
+        const nx = Math.cos(angToP)*e.speed*dt;
+        const ny = Math.sin(angToP)*e.speed*dt;
+        // simple collision: step and avoid walls
+        if (!isWallAtWorld(e.x+nx, e.y)) e.x += nx;
+        if (!isWallAtWorld(e.x, e.y+ny)) e.y += ny;
+        // if close enough, attack player (reduce hp slowly)
+        if (d < 42 && player.hp > 0){
+          player.hp = Math.max(0, player.hp - 18 * dt);
+        }
+      } else {
+        // idle wander small
+        if (!e._wandTimer || e._wandTimer <= 0){
+          e._wandTimer = 1 + Math.random()*3;
+          e._wandAngle = Math.random()*Math.PI*2;
+        } else {
+          e._wandTimer -= dt;
+          const nx = Math.cos(e._wandAngle)*e.speed*0.4*dt;
+          const ny = Math.sin(e._wandAngle)*e.speed*0.4*dt;
+          if (!isWallAtWorld(e.x+nx,e.y)) e.x+=nx;
+          if (!isWallAtWorld(e.x,e.y+ny)) e.y+=ny;
+        }
+      }
+    }
+  }
+
+  function hasLineOfSight(x0,y0,x1,y1){
+    const ang = Math.atan2(y1-y0, x1-x0);
+    const ray = castRay(x0,y0,ang);
+    return ray.dist > Math.hypot(x1-x0, y1-y0) - 8;
+  }
+
+  // ==== Shooting (hitscan) ====
+  const bullets = []; // short-lived visual bullets
+  function shoot(){
+    // play simple muzzle (we'll just spawn bullet visual and do hitscan)
+    const bx = player.x, by = player.y;
+    const angle = player.ang;
+    bullets.push({ x: bx, y: by, angle, life: 0.12, speed: 1200 });
+    // hitscan along ray in small steps
+    const step = 8;
+    for (let t = 0; t < 1200; t += step){
+      const px = bx + Math.cos(angle) * t;
+      const py = by + Math.sin(angle) * t;
+      // check hit enemy first
+      for (let e of enemies){
+        if (!e.alive) continue;
+        const edx = e.x - px, edy = e.y - py;
+        if (Math.hypot(edx, edy) < 18){
+          // hit
+          e.hp -= 40;
+          e.lastHit = performance.now();
+          if (e.hp <= 0) { e.alive = false; }
+          // return on hit (bullet stops)
+          t = 9999; break;
+        }
+      }
+      // check wall
+      if (isWallAtWorld(px, py)) break;
+    }
+  }
+
+  // ==== Rendering ====
+  let rays = BASE_RAYS;
+  const planeDistBase = () => (W/2)/Math.tan(HALF_FOV);
+  function renderScene(){
+    // sky & floor
+    ctx.fillStyle = '#6a6a75'; ctx.fillRect(0,0,W, H/2);
+    ctx.fillStyle = '#1a1a1a'; ctx.fillRect(0,H/2, W, H/2);
+
+    const viewDist = planeDistBase();
+    const colW = W / rays;
+
+    // precalc cos per ray to correct fish-eye
+    for (let i=0;i<rays;i++){
+      const cameraX = (2 * i / rays) - 1; // -1..1
+      const rayAngle = player.ang + Math.atan(cameraX * Math.tan(HALF_FOV));
+      const r = castRay(player.x, player.y, rayAngle);
+      const corrected = r.dist * Math.cos(rayAngle - player.ang);
+      const lineH = Math.min(H*2, (TILE * viewDist) / Math.max(0.0001, corrected));
+      const drawStart = Math.floor((H / 2) - lineH/2);
+      const drawEnd = Math.floor((H / 2) + lineH/2);
+
+      // pick texture and draw a vertical slice using drawImage (fast)
+      const tex = textures[r.texIndex];
+      // drawImage(img, sx, sy, sw, sh, dx, dy, dw, dh)
+      ctx.save();
+      // shading by side and distance
+      let shade = (r.side === 1) ? 0.72 : 1.0;
+      shade *= Math.max(0.18, 1 - (corrected / 1400));
+      ctx.globalAlpha = 1;
+      // draw 1px slice scaled to line height
+      // sx = r.texX
+      ctx.drawImage(tex, r.texX, 0, 1, tex.height, i*colW, drawStart, colW + 0.8, Math.max(1, drawEnd - drawStart));
+      // apply shade overlay
+      ctx.fillStyle = `rgba(0,0,0,${1-shade})`;
+      ctx.fillRect(i*colW, drawStart, colW+0.8, Math.max(1, drawEnd - drawStart));
+      ctx.restore();
+    }
+
+    // Draw sprites (enemies) as simple scaled rectangles / billboards
+    // We'll gather visible sprites, sort by distance desc for proper overlap
+    const spritesToDraw = [];
+    for (let e of enemies){
+      if (!e.alive) continue;
+      const dx = e.x - player.x, dy = e.y - player.y;
+      const dist = Math.hypot(dx,dy);
+      const angTo = Math.atan2(dy,dx);
+      let rel = angTo - player.ang;
+      // normalize to -PI..PI
+      rel = ((rel + Math.PI) % (Math.PI*2)) - Math.PI;
+      if (Math.abs(rel) > HALF_FOV + 0.4) continue; // outside view (small buffer)
+      // occlusion: cast small ray and compare distances
+      const rayHit = castRay(player.x, player.y, angTo);
+      if (rayHit.dist < dist - 8) continue; // wall is between
+      // compute on-screen x
+      const screenX = (0.5 * (1 + Math.tan(rel) / Math.tan(HALF_FOV))) * W;
+      const scale = Math.min(1.2, (TILE * viewDist) / Math.max(1, dist));
+      const spriteH = Math.max(8, scale * 40);
+      spritesToDraw.push({ e, dist, screenX, spriteH });
+    }
+    // sort back-to-front
+    spritesToDraw.sort((a,b)=>b.dist - a.dist);
+    for (let s of spritesToDraw){
+      // simple enemy visual: rectangle with flicker on hit
+      const e = s.e;
+      const x = s.screenX - s.spriteH/2, y = (H/2) - s.spriteH/2;
+      // flash when hit
+      const flash = (performance.now() - (e.lastHit||0)) < 140;
+      ctx.fillStyle = flash ? '#ffbbbb' : '#cc4444';
+      ctx.fillRect(x, y, s.spriteH, s.spriteH);
+      // eyes
+      ctx.fillStyle = '#fff';
+      ctx.fillRect(x + s.spriteH*0.2, y + s.spriteH*0.3, s.spriteH*0.2, s.spriteH*0.2);
+      ctx.fillRect(x + s.spriteH*0.6, y + s.spriteH*0.3, s.spriteH*0.2, s.spriteH*0.2);
+    }
+
+    // draw bullets visuals
+    for (let b of bullets){
+      const bx = b.x + Math.cos(b.angle) * b.speed * b.t;
+      const by = b.y + Math.sin(b.angle) * b.speed * b.t;
+      // project bullet screen position similar to sprite (approx)
+      const dx = bx - player.x, dy = by - player.y;
+      const dist = Math.hypot(dx,dy);
+      const angTo = Math.atan2(dy,dx);
+      let rel = ((angTo - player.ang + Math.PI) % (Math.PI*2)) - Math.PI;
+      if (Math.abs(rel) < HALF_FOV){
+        const screenX = (0.5 * (1 + Math.tan(rel) / Math.tan(HALF_FOV))) * W;
+        const size = Math.max(2, (TILE * viewDist) / Math.max(1, dist) * 0.05);
+        const screenY = H/2;
+        ctx.fillStyle = '#ffd';
+        ctx.fillRect(screenX - size/2, screenY - size/2, size, size);
+      }
+    }
+
+    // HUD crosshair
+    ctx.fillStyle = "rgba(0,0,0,0.6)";
+    ctx.fillRect(W/2 - 1, H/2 - 12, 2, 24);
+    ctx.fillRect(W/2 - 12, H/2 - 1, 24, 2);
+    // simple status
+    document.getElementById('hp').textContent = `HP: ${Math.max(0, Math.round(player.hp))}`;
+  }
+
+  // ==== Bullets update ====
+  function updateBullets(dt){
+    for (let i = bullets.length-1; i >= 0; i--){
+      const b = bullets[i];
+      b.t = (b.t || 0) + dt;
+      // move bullet and check collision with wall (visual only; hits handled by hitscan)
+      const px = b.x + Math.cos(b.angle) * b.speed * b.t;
+      const py = b.y + Math.sin(b.angle) * b.speed * b.t;
+      if (isWallAtWorld(px,py) || b.t > 0.6) bullets.splice(i,1);
+    }
+  }
+
+  // ==== Main loop ====
+  let last = performance.now();
+  let fpsAcc = 0, fpsCount = 0, lastFPS = performance.now();
+  function loop(now){
+    const dt = Math.min(0.05, (now - last) / 1000);
+    last = now;
+
+    // movement
+    let moveSpeed = 140;
+    const step = moveSpeed * dt;
+    // keyboard
+    let mvx = 0, mvy = 0;
+    if (keys['KeyW']||keys['ArrowUp']) { mvx += Math.cos(player.ang)*step; mvy += Math.sin(player.ang)*step; }
+    if (keys['KeyS']||keys['ArrowDown']) { mvx -= Math.cos(player.ang)*step; mvy -= Math.sin(player.ang)*step; }
+    if (keys['KeyA']) { mvx += Math.cos(player.ang - Math.PI/2)*step; mvy += Math.sin(player.ang - Math.PI/2)*step; }
+    if (keys['KeyD']) { mvx += Math.cos(player.ang + Math.PI/2)*step; mvy += Math.sin(player.ang + Math.PI/2)*step; }
+    if (keys['ArrowLeft']) player.ang -= 2.6 * dt;
+    if (keys['ArrowRight']) player.ang += 2.6 * dt;
+
+    // touch joystick movement
+    if (touchMove.active){
+      // convert joystick vector to world-relative movement (thumb y forward)
+      const jx = touchMove.x, jy = -touchMove.y; // y inverted (up = -1)
+      const mag = Math.hypot(jx, jy);
+      if (mag > 0.12){
+        const ang = Math.atan2(jy, jx) + player.ang;
+        const sp = step * Math.min(1, mag*1.2);
+        mvx += Math.cos(ang)*sp; mvy += Math.sin(ang)*sp;
+      }
+    }
+
+    // collide & move
+    const newX = player.x + mvx, newY = player.y + mvy;
+    const cr = 14;
+    if (!isWallAtWorld(newX + Math.cos(player.ang)*cr, player.y + Math.sin(player.ang)*cr)) player.x = newX;
+    if (!isWallAtWorld(player.x + Math.cos(player.ang)*cr, newY + Math.sin(player.ang)*cr)) player.y = newY;
+
+    // updates
+    updateEnemies(dt);
+    updateBullets(dt);
+
+    // render
+    renderScene();
+
+    // fps calc
+    fpsAcc += 1/dt; fpsCount++;
+    if (now - lastFPS > 500){
+      const fps = Math.round((fpsAcc / fpsCount) || 60);
+      document.getElementById('fps').textContent = `${fps} FPS`;
+      fpsAcc = 0; fpsCount = 0; lastFPS = now;
+    }
+
+    requestAnimationFrame(loop);
+  }
+
+  // init bullets array small
+  bullets.length = 0;
+
+  // Start loop
+  requestAnimationFrame(loop);
+
+  // ==== utilities ====
+  function isWallAtWorld(x,y){ return isWallAtWorld_impl(x,y); }
+  function isWallAtWorld_impl(x,y){ const mx = Math.floor(x/TILE), my = Math.floor(y/TILE); if (mx<0||my<0||mx>=MAP_W||my>=MAP_H) return true; return MAP[my][mx] === '#'; }
+
+  // expose shoot on mouse click
+  canvas.addEventListener('mousedown', e => {
+    if (e.button === 0) shoot();
+  });
+
+  // prevent context menu on long touch
+  canvas.addEventListener('contextmenu', e => e.preventDefault());
+
+  // initial reset
+  resetLevel();
+
+})();
+</script>
+</body>
+</html>
