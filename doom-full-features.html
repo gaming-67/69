@@ -1,0 +1,735 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Mini DOOM — Hit Flash · Particles · Ammo · Levels</title>
+<style>
+  :root{--panel:rgba(0,0,0,0.45);--accent:#ffcc22}
+  html,body{height:100%;margin:0;background:#050507;color:#ddd;font-family:system-ui,Segoe UI,Roboto,Arial}
+  canvas{display:block;width:100vw;height:100vh;touch-action:none;background:#000}
+  #ui{position:fixed;left:10px;top:10px;z-index:50;background:var(--panel);padding:10px;border-radius:8px;font-size:13px}
+  #ui small{color:#bbb;display:block;margin-top:6px}
+  #rightHud{position:fixed;right:10px;top:10px;z-index:50;background:var(--panel);padding:10px;border-radius:8px;font-size:13px}
+  .healthbar{width:220px;height:18px;background:#300;border:2px solid #600;border-radius:6px;overflow:hidden}
+  .hpInner{height:100%;background:linear-gradient(90deg,#0f0,#6f0);transform-origin:left center}
+  .ammo{margin-top:6px;color:#ffd}
+  .small-btn{cursor:pointer;margin-left:6px;padding:5px 8px;background:rgba(255,255,255,0.05);border-radius:6px}
+  #msg{position:fixed;left:50%;transform:translateX(-50%);top:12px;background:rgba(0,0,0,0.5);padding:8px 12px;border-radius:8px;font-size:13px;z-index:40}
+  /* hit flash overlay */
+  #flash{pointer-events:none;position:fixed;left:0;top:0;right:0;bottom:0;background:rgba(255,0,0,0);z-index:60;transition:background 120ms linear}
+  /* basic touch joystick visuals (mobile) */
+  #touchLeft,#touchRight{position:fixed;bottom:14px;z-index:60;display:none}
+  #touchLeft{left:14px;width:140px;height:140px}
+  #touchRight{right:14px;width:140px;height:140px;display:flex;align-items:center;justify-content:center}
+  .joyBase{width:100%;height:100%;border-radius:50%;background:rgba(255,255,255,0.03);display:flex;align-items:center;justify-content:center}
+  .joyThumb{width:44px;height:44px;border-radius:50%;background:rgba(255,255,255,0.12);transform:translate(0,0)}
+  .fireBtn{width:84px;height:84px;border-radius:50%;background:linear-gradient(180deg,#ff6a4a,#d24022);display:flex;align-items:center;justify-content:center;color:#fff;font-weight:700}
+  #levelCounter{font-weight:700;color:var(--accent);margin-left:8px}
+</style>
+</head>
+<body>
+  <canvas id="c"></canvas>
+
+  <div id="ui">
+    <strong>Mini DOOM — Upgraded</strong>
+    <div style="margin-top:6px">WASD move · A/D strafe · Mouse to look (click) · Space/Click to shoot · R reload · L next level</div>
+    <small>Features: hit flash, bullet particles, ammo & reload, sequential levels.</small>
+  </div>
+
+  <div id="rightHud">
+    <div class="healthbar"><div id="hpInner" class="hpInner"></div></div>
+    <div class="ammo" id="ammoText">Ammo: —</div>
+    <div style="margin-top:6px">
+      <span class="small-btn" id="reloadBtn">R</span>
+      <span class="small-btn" id="nextBtn">L</span>
+      <span id="levelCounter">Lv 1</span>
+    </div>
+  </div>
+
+  <div id="msg">Good luck. Enemies fire at you — dodge or shoot them.</div>
+  <div id="flash"></div>
+
+  <!-- mobile touch -->
+  <div id="touchLeft"><div class="joyBase" id="joyBase"><div class="joyThumb" id="joyThumb"></div></div></div>
+  <div id="touchRight"><div class="fireBtn" id="fireBtn">FIRE</div></div>
+
+<script>
+(() => {
+  // --------- Config ----------
+  const TILE = 64;
+  const FOV = Math.PI / 3;
+  const HALF_FOV = FOV / 2;
+  const BASE_RAYS = 300;
+  const MOBILE_RAYS = 140;
+
+  // ammo/reload config
+  const MAX_AMMO = 12;       // bullets in magazine
+  const RELOAD_TIME = 1000;  // ms to reload
+
+  // particle config
+  const PARTICLE_LIFE = 0.45; // seconds
+  const PARTICLE_PER_IMPACT = 10;
+
+  // levels (pre-made maps)
+  const LEVELS = [
+    {
+      map:[
+        "################",
+        "#..............#",
+        "#..##....##....#",
+        "#..##....##....#",
+        "#..............#",
+        "#..####..####..#",
+        "#..#........#..#",
+        "#..#..##....#..#",
+        "#..#..##....#..#",
+        "#..#........#..#",
+        "#..####..####..#",
+        "#..............#",
+        "#.....##.......#",
+        "#..............#",
+        "#..............#",
+        "################",
+      ],
+      spawns: [[8.5,6.5],[12.5,3.5],[6.5,10.5]]
+    },
+    {
+      map:[
+        "################",
+        "#.....#........#",
+        "#..##.#..##....#",
+        "#..##.#..##....#",
+        "#.....#........#",
+        "#..####..####..#",
+        "#..#........#..#",
+        "#..#..##....#..#",
+        "#..#..##....#..#",
+        "#..#........#..#",
+        "#..####..####..#",
+        "#..............#",
+        "#.....##.......#",
+        "#..............#",
+        "#..............#",
+        "################",
+      ],
+      spawns: [[7.5,8.5],[10.5,5.5],[11.5,11.5],[5.5,3.5]]
+    }
+  ];
+
+  // ---------- State ----------
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d', { alpha:false });
+  let W = innerWidth, H = innerHeight;
+  let dpr = Math.max(1, window.devicePixelRatio || 1);
+  function resize(){
+    W = innerWidth; H = innerHeight;
+    canvas.style.width = W + 'px';
+    canvas.style.height = H + 'px';
+    canvas.width = Math.floor(W * dpr);
+    canvas.height = Math.floor(H * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    // rays adapt
+    if (isMobile()) rays = MOBILE_RAYS;
+    else rays = Math.max(180, Math.floor(BASE_RAYS * Math.min(1, W / 1280)));
+  }
+  window.addEventListener('resize', resize);
+  resize();
+
+  // UI elements
+  const hpInner = document.getElementById('hpInner');
+  const ammoText = document.getElementById('ammoText');
+  const reloadBtn = document.getElementById('reloadBtn');
+  const nextBtn = document.getElementById('nextBtn');
+  const levelCounter = document.getElementById('levelCounter');
+  const flashEl = document.getElementById('flash');
+
+  // touch elements
+  const touchLeft = document.getElementById('touchLeft');
+  const touchRight = document.getElementById('touchRight');
+  const joyBase = document.getElementById('joyBase');
+  const joyThumb = document.getElementById('joyThumb');
+  const fireBtn = document.getElementById('fireBtn');
+
+  // helper: mobile detection
+  function isMobile(){ return navigator.maxTouchPoints && navigator.maxTouchPoints > 0 || /Mobi|Android/i.test(navigator.userAgent); }
+
+  // ---------- Level / map ----------
+  let currentLevel = 0;
+  let MAP = LEVELS[currentLevel].map;
+  let MAP_W = MAP[0].length, MAP_H = MAP.length;
+
+  function loadLevel(idx){
+    currentLevel = idx % LEVELS.length;
+    MAP = LEVELS[currentLevel].map;
+    MAP_W = MAP[0].length; MAP_H = MAP.length;
+    spawnEnemiesFromLevel(LEVELS[currentLevel].spawns);
+    player.x = TILE * 3.5; player.y = TILE * 3.5; player.hp = 100;
+    player.ammo = MAX_AMMO; player.reloading = false; reloadEndAt = 0;
+    levelCounter.textContent = `Lv ${currentLevel + 1}`;
+  }
+
+  // ---------- Player ----------
+  const player = {
+    x: TILE * 3.5,
+    y: TILE * 3.5,
+    ang: 0.6,
+    hp: 100,
+    ammo: MAX_AMMO,
+    reloading: false
+  };
+
+  // ---------- Enemies ----------
+  let enemies = [];
+  function spawnEnemiesFromLevel(spawns){
+    enemies = [];
+    for (let s of spawns){
+      enemies.push({ x: s[0] * TILE, y: s[1] * TILE, hp: 60 + Math.floor(Math.random()*40), alive: true, shootCooldown: 0 });
+    }
+  }
+
+  // start first level
+  loadLevel(0);
+
+  // ---------- Bullets & particles ----------
+  const enemyBullets = [];
+  const playerBullets = [];
+  const particles = []; // small particles for impacts
+
+  // ---------- Raycast helpers ----------
+  function mapAt(mx, my){
+    if (mx < 0 || my < 0 || my >= MAP_H || mx >= MAP_W) return '#';
+    return MAP[my][mx];
+  }
+  function isWallAtWorld(x, y){
+    const mx = Math.floor(x / TILE), my = Math.floor(y / TILE);
+    if (mx < 0 || my < 0 || mx >= MAP_W || my >= MAP_H) return true;
+    return MAP[my][mx] === '#';
+  }
+
+  // DDA line check for line-of-sight (returns true if clear)
+  function hasLineOfSight(x0, y0, x1, y1){
+    const ang = Math.atan2(y1 - y0, x1 - x0);
+    const sin = Math.sin(ang), cos = Math.cos(ang);
+    let dist = 0;
+    while (dist < 5000){
+      dist += 8;
+      const px = x0 + cos * dist, py = y0 + sin * dist;
+      if (isWallAtWorld(px, py)) return false;
+      if (Math.hypot(px - x1, py - y1) < 8) return true;
+    }
+    return false;
+  }
+
+  // ---------- Hit flash ----------
+  let flashTimer = 0;
+  function triggerHitFlash(){
+    flashTimer = 0.14;
+    flashEl.style.background = 'rgba(255,0,0,0.35)';
+    setTimeout(()=>{ /* will fade via loop */ }, 120);
+  }
+
+  // ---------- Particles ----------
+  function spawnImpact(x, y, normalAngle, color){
+    for (let i = 0; i < PARTICLE_PER_IMPACT; i++){
+      const a = normalAngle + (Math.random() - 0.5) * Math.PI * 0.6;
+      const speed = 80 + Math.random()*220;
+      particles.push({
+        x, y,
+        vx: Math.cos(a) * speed,
+        vy: Math.sin(a) * speed,
+        life: PARTICLE_LIFE * (0.6 + Math.random()*0.7),
+        color: color || '#ffcc88',
+        size: 1 + Math.random()*2
+      });
+    }
+  }
+
+  // ---------- Shooting mechanics ----------
+  function playerFire(){
+    if (player.reloading) return;
+    if (player.ammo <= 0){
+      // no ammo sound/feedback -> start reload automatically
+      startReload();
+      return;
+    }
+    player.ammo--;
+    // spawn visual projectile
+    const angle = player.ang + (Math.random()-0.5)*0.004;
+    playerBullets.push({ x: player.x + Math.cos(angle)*16, y: player.y + Math.sin(angle)*16, vx: Math.cos(angle)*1100, vy: Math.sin(angle)*1100, life: 0.7 });
+    // hitscan for enemy immediate damage
+    for (let e of enemies){
+      if (!e.alive) continue;
+      const dx = e.x - player.x, dy = e.y - player.y;
+      const dist = Math.hypot(dx, dy);
+      const angTo = Math.atan2(dy, dx);
+      let rel = angTo - angle; rel = ((rel + Math.PI) % (2*Math.PI)) - Math.PI;
+      if (Math.abs(rel) < 0.25 && dist < 900 && hasLineOfSight(player.x, player.y, e.x, e.y)){
+        e.hp -= 36;
+        spawnImpact(e.x, e.y, angTo, '#ffb3b3');
+        if (e.hp <= 0) e.alive = false;
+        break; // stop after hitting one enemy
+      }
+    }
+    updateUI();
+  }
+
+  let reloadEndAt = 0;
+  function startReload(){
+    if (player.reloading) return;
+    player.reloading = true;
+    reloadEndAt = performance.now() + RELOAD_TIME;
+    updateUI();
+    setTimeout(()=>{ player.ammo = MAX_AMMO; player.reloading = false; updateUI(); }, RELOAD_TIME);
+  }
+
+  // ---------- Enemy AI & fire ----------
+  function fireEnemyBullet(enemy, angle){
+    const spread = (Math.random() - 0.5) * 0.16;
+    const a = angle + spread;
+    enemyBullets.push({
+      x: enemy.x + Math.cos(a)*18,
+      y: enemy.y + Math.sin(a)*18,
+      vx: Math.cos(a) * (380 + Math.random()*80),
+      vy: Math.sin(a) * (380 + Math.random()*80),
+      life: 3.0,
+      dmg: 10
+    });
+  }
+
+  function updateEnemies(dt){
+    for (let e of enemies){
+      if (!e.alive) continue;
+      const dx = player.x - e.x, dy = player.y - e.y;
+      const d = Math.hypot(dx, dy);
+      const angTo = Math.atan2(dy, dx);
+      // move toward if not too close
+      if (d > 60){
+        const speed = 38 + Math.random()*18;
+        const nx = Math.cos(angTo) * speed * dt, ny = Math.sin(angTo) * speed * dt;
+        if (!isWallAtWorld(e.x + nx, e.y + ny)){ e.x += nx; e.y += ny; }
+      } else {
+        // damage player when close
+        player.hp -= 18 * dt;
+        if (player.hp < 0) player.hp = 0;
+        triggerHitFlash();
+      }
+      // shooting
+      e.shootCooldown = e.shootCooldown || 0;
+      e.shootCooldown -= dt;
+      if (d < 750 && e.shootCooldown <= 0 && hasLineOfSight(e.x, e.y, player.x, player.y)){
+        fireEnemyBullet(e, angTo);
+        e.shootCooldown = 1.2 + Math.random()*1.6;
+      }
+    }
+  }
+
+  // ---------- Bullets update ----------
+  function updateBullets(dt){
+    // enemy bullets
+    for (let i = enemyBullets.length - 1; i >= 0; i--){
+      const b = enemyBullets[i];
+      b.life -= dt;
+      b.x += b.vx * dt; b.y += b.vy * dt;
+      // wall collision
+      if (isWallAtWorld(b.x, b.y) || b.life <= 0){
+        // spawn particles at impact and remove
+        // compute normal angle by sampling back a bit
+        const backX = b.x - b.vx * 0.01, backY = b.y - b.vy * 0.01;
+        const nx = Math.atan2(b.y - backY, b.x - backX);
+        spawnImpact(b.x, b.y, nx, '#ffd3a6');
+        enemyBullets.splice(i, 1);
+        continue;
+      }
+      // hit player
+      const distP = Math.hypot(b.x - player.x, b.y - player.y);
+      if (distP < 18){
+        player.hp -= b.dmg;
+        if (player.hp < 0) player.hp = 0;
+        triggerHitFlash();
+        spawnImpact(b.x, b.y, Math.atan2(b.y - player.y, b.x - player.x), '#ff8b8b');
+        enemyBullets.splice(i, 1);
+        continue;
+      }
+    }
+
+    // player bullets
+    for (let i = playerBullets.length - 1; i >= 0; i--){
+      const b = playerBullets[i];
+      b.life -= dt;
+      b.x += b.vx * dt; b.y += b.vy * dt;
+      if (isWallAtWorld(b.x, b.y) || b.life <= 0){
+        spawnImpact(b.x, b.y, Math.atan2(b.vy, b.vx), '#ffd');
+        playerBullets.splice(i, 1);
+        continue;
+      }
+      // enemy hit?
+      for (let e of enemies){
+        if (!e.alive) continue;
+        if (Math.hypot(b.x - e.x, b.y - e.y) < 18){
+          e.hp -= 36;
+          spawnImpact(b.x, b.y, Math.atan2(b.y - e.y, b.x - e.x), '#ffb3b3');
+          if (e.hp <= 0) e.alive = false;
+          playerBullets.splice(i, 1);
+          break;
+        }
+      }
+    }
+  }
+
+  // ---------- Particles update ----------
+  function updateParticles(dt){
+    for (let i = particles.length - 1; i >= 0; i--){
+      const p = particles[i];
+      p.life -= dt;
+      if (p.life <= 0){ particles.splice(i, 1); continue; }
+      // simple physics & decay
+      p.x += p.vx * dt; p.y += p.vy * dt;
+      p.vx *= 0.96; p.vy *= 0.96;
+    }
+  }
+
+  // ---------- Input ----------
+  const keys = {};
+  window.addEventListener('keydown', e => {
+    keys[e.code] = true;
+    // prevent page scroll on space/arrow when focused
+    if (['Space','ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(e.code)) e.preventDefault();
+    // reload / next level
+    if (e.code === 'KeyR') startReload();
+    if (e.code === 'KeyL') loadLevel(currentLevel + 1);
+  });
+  window.addEventListener('keyup', e => { keys[e.code] = false; });
+
+  // mouse + pointer lock
+  canvas.addEventListener('click', ()=>{ canvas.requestPointerLock(); }); // click to lock
+  window.addEventListener('mousemove', e => {
+    if (document.pointerLockElement === canvas) player.ang += e.movementX * 0.0024;
+  });
+
+  // touch joystick (mobile)
+  let touchMove = { x:0, y:0, active:false };
+  if (isMobile()){
+    touchLeft.style.display = 'block';
+    touchRight.style.display = 'block';
+    // joystick thumb
+    function setJoyFromCoord(x,y){
+      const r = joyBase.getBoundingClientRect();
+      const cx = r.left + r.width/2, cy = r.top + r.height/2;
+      let dx = (x - cx) / (r.width/2), dy = (y - cy) / (r.height/2);
+      dx = Math.max(-1, Math.min(1, dx)); dy = Math.max(-1, Math.min(1, dy));
+      joyThumb.style.transform = `translate(${dx*36}px,${dy*36}px)`;
+      touchMove.x = dx; touchMove.y = dy; touchMove.active = true;
+    }
+    function resetJoy(){ joyThumb.style.transform = 'translate(0,0)'; touchMove.active = false; touchMove.x = 0; touchMove.y = 0; }
+    joyBase.addEventListener('touchstart', e => { e.preventDefault(); setJoyFromCoord(e.touches[0].clientX, e.touches[0].clientY); });
+    joyBase.addEventListener('touchmove', e => { e.preventDefault(); setJoyFromCoord(e.touches[0].clientX, e.touches[0].clientY); });
+    joyBase.addEventListener('touchend', e => { e.preventDefault(); resetJoy(); });
+    // look by drag on right
+    let lastTouchX = null;
+    touchRight.addEventListener('touchstart', e => { e.preventDefault(); lastTouchX = e.touches[0].clientX; });
+    touchRight.addEventListener('touchmove', e => { e.preventDefault(); const dx = e.touches[0].clientX - lastTouchX; player.ang += dx * 0.007; lastTouchX = e.touches[0].clientX; });
+    touchRight.addEventListener('touchend', e => { e.preventDefault(); lastTouchX = null; });
+    // fire button
+    fireBtn.addEventListener('touchstart', e => { e.preventDefault(); playerFire(); });
+    fireBtn.addEventListener('click', e => { e.preventDefault(); playerFire(); });
+  }
+
+  // UI events
+  reloadBtn.addEventListener('click', startReload);
+  nextBtn.addEventListener('click', ()=> loadLevel(currentLevel + 1));
+
+  // ---------- Movement & collision ----------
+  function tryMove(dx, dy){
+    if (!isWallAtWorld(player.x + dx, player.y)) player.x += dx;
+    if (!isWallAtWorld(player.x, player.y + dy)) player.y += dy;
+  }
+
+  // ---------- Rendering (raycast + sprites) ----------
+  let rays = BASE_RAYS;
+  function render(){
+    // basic floor & ceiling
+    ctx.fillStyle = '#5a5a66'; ctx.fillRect(0,0,W,H/2);
+    ctx.fillStyle = '#0d0d0d'; ctx.fillRect(0,H/2,W,H/2);
+
+    // rays
+    const planeDist = (W/2) / Math.tan(HALF_FOV);
+    const colW = W / rays;
+    for (let r = 0; r < rays; r++){
+      const cameraX = (2 * r / rays) - 1;
+      const rayAngle = player.ang + Math.atan(cameraX * Math.tan(HALF_FOV));
+      const res = castSingleRay(player.x, player.y, rayAngle);
+      const corrected = res.dist * Math.cos(rayAngle - player.ang);
+      const lineH = Math.min(H*2, (TILE * planeDist) / Math.max(0.0001, corrected));
+      const drawStart = Math.floor((H/2) - lineH/2);
+      const colorIdx = (Math.floor(r * 0.03) % 4 + 4) % 4;
+      const baseCols = ['#9a9a9a','#7c5c3c','#5c7c3c','#5c5c7c'];
+      const shade = Math.max(0.16, 1 - (corrected / 1600));
+      ctx.fillStyle = shadeColor(baseCols[colorIdx], shade);
+      ctx.fillRect(r*colW, drawStart, colW+0.9, Math.max(1, drawStart + lineH - drawStart));
+    }
+
+    // draw sprites (enemies) sorted far -> near
+    const sprites = [];
+    for (let e of enemies){
+      if (!e.alive) continue;
+      const dx = e.x - player.x, dy = e.y - player.y;
+      const dist = Math.hypot(dx, dy);
+      const angTo = Math.atan2(dy, dx);
+      let rel = angTo - player.ang; rel = ((rel + Math.PI) % (2*Math.PI)) - Math.PI;
+      if (Math.abs(rel) > HALF_FOV + 0.6) continue;
+      // occlusion via LOS: quick check
+      if (!hasLineOfSight(player.x, player.y, e.x, e.y)) continue;
+      const screenX = (0.5 * (1 + Math.tan(rel) / Math.tan(HALF_FOV))) * W;
+      const scale = Math.min(1.8, (TILE * planeDist) / Math.max(1, dist));
+      const spriteSize = Math.max(8, scale * 44);
+      sprites.push({ e, dist, screenX, spriteSize });
+    }
+    sprites.sort((a,b) => b.dist - a.dist);
+    for (let s of sprites){
+      const e = s.e;
+      const x = s.screenX - s.spriteSize/2, y = H/2 - s.spriteSize/2;
+      // enemy body
+      ctx.fillStyle = '#c33';
+      ctx.fillRect(x, y, s.spriteSize, s.spriteSize);
+      // enemy health bar
+      const pct = Math.max(0, Math.min(1, e.hp / 100));
+      ctx.fillStyle = '#0f0';
+      ctx.fillRect(x, y - 6, s.spriteSize * pct, 4);
+      ctx.fillStyle = '#330';
+      ctx.fillRect(x + s.spriteSize * pct, y - 6, s.spriteSize * (1-pct), 4);
+    }
+
+    // draw bullets as small screen-projected dots
+    for (let b of enemyBullets){
+      const sx = projectToScreenX(b.x, b.y);
+      if (sx !== null){ ctx.fillStyle = '#ffddaa'; ctx.fillRect(sx-2, H/2-2, 4, 4); }
+    }
+    for (let b of playerBullets){
+      const sx = projectToScreenX(b.x, b.y);
+      if (sx !== null){ ctx.fillStyle = '#ffeeaa'; ctx.fillRect(sx-2, H/2-2, 4, 4); }
+    }
+
+    // draw particles in world (projected as small splat near center line)
+    for (let p of particles){
+      const sx = projectToScreenX(p.x, p.y);
+      if (sx !== null){
+        const alpha = Math.max(0, p.life / PARTICLE_LIFE);
+        ctx.fillStyle = mixColor(p.color, `rgba(0,0,0,0.0)`, alpha);
+        ctx.globalAlpha = alpha;
+        ctx.fillRect(sx - p.size, H/2 - p.size, p.size*2, p.size*2);
+        ctx.globalAlpha = 1;
+      }
+    }
+
+    // crosshair
+    ctx.fillStyle = 'rgba(0,0,0,0.6)';
+    ctx.fillRect(W/2 - 1, H/2 - 12, 2, 24);
+    ctx.fillRect(W/2 - 12, H/2 - 1, 24, 2);
+
+    drawMiniMap();
+  }
+
+  function castSingleRay(ox, oy, angle){
+    let a = angle % (Math.PI*2); if (a < 0) a += Math.PI*2;
+    const sin = Math.sin(a), cos = Math.cos(a);
+    let mapX = Math.floor(ox / TILE), mapY = Math.floor(oy / TILE);
+    const deltaDistX = Math.abs(1 / (cos || 1e-6));
+    const deltaDistY = Math.abs(1 / (sin || 1e-6));
+    let stepX, stepY, sideDistX, sideDistY;
+    if (cos < 0){ stepX = -1; sideDistX = (ox - mapX*TILE) * deltaDistX / TILE; } else { stepX = 1; sideDistX = ((mapX+1)*TILE - ox) * deltaDistX / TILE; }
+    if (sin < 0){ stepY = -1; sideDistY = (oy - mapY*TILE) * deltaDistY / TILE; } else { stepY = 1; sideDistY = ((mapY+1)*TILE - oy) * deltaDistY / TILE; }
+    let hit = false, side = 0, safety = 0;
+    while (!hit && safety++ < 4096){
+      if (sideDistX < sideDistY){ sideDistX += deltaDistX / TILE; mapX += stepX; side = 0; } else { sideDistY += deltaDistY / TILE; mapY += stepY; side = 1; }
+      if (mapAt(mapX, mapY) === '#') hit = true;
+    }
+    if (!hit) return { dist: 1e6, side:0 };
+    let hitX, hitY, perpDist;
+    if (side === 0){
+      const xHit = mapX * TILE + (stepX === -1 ? TILE : 0);
+      const t = (xHit - ox) / (cos || 1e-6);
+      hitX = ox + cos * t; hitY = oy + sin * t;
+      perpDist = Math.abs((hitX - ox) / (cos || 1e-6));
+    } else {
+      const yHit = mapY * TILE + (stepY === -1 ? TILE : 0);
+      const t = (yHit - oy) / (sin || 1e-6);
+      hitX = ox + cos * t; hitY = oy + sin * t;
+      perpDist = Math.abs((hitY - oy) / (sin || 1e-6));
+    }
+    return { dist: perpDist, hitX, hitY, side };
+  }
+
+  // project world x,y to screen X (null if behind/outside)
+  function projectToScreenX(wx, wy){
+    const dx = wx - player.x, dy = wy - player.y;
+    const ang = Math.atan2(dy, dx);
+    let rel = ang - player.ang; rel = ((rel + Math.PI) % (2*Math.PI)) - Math.PI;
+    if (Math.abs(rel) > HALF_FOV + 0.6) return null;
+    const sx = (0.5 * (1 + Math.tan(rel) / Math.tan(HALF_FOV))) * W;
+    return sx;
+  }
+
+  // mixing color helper (simple fade)
+  function mixColor(a, b, t){
+    // if b is rgba string sentinel, just return a with alpha 't'
+    if (b.startsWith('rgba')) return a;
+    return a;
+  }
+
+  // ---------- Mini-map ----------
+  function drawMiniMap(){
+    const scale = 0.14;
+    const mmX = 10, mmY = 10;
+    ctx.save();
+    ctx.translate(mmX, mmY);
+    ctx.scale(scale, scale);
+    ctx.fillStyle = 'rgba(0,0,0,0.6)';
+    ctx.fillRect(0, 0, MAP_W * TILE, MAP_H * TILE);
+    // walls
+    ctx.fillStyle = '#999';
+    for (let y=0;y<MAP_H;y++){
+      for (let x=0;x<MAP_W;x++){
+        if (MAP[y][x] === '#') ctx.fillRect(x*TILE, y*TILE, TILE, TILE);
+      }
+    }
+    // enemies
+    for (let e of enemies){ if (!e.alive) continue; ctx.fillStyle = '#f55'; ctx.beginPath(); ctx.arc(e.x, e.y, 10, 0, Math.PI*2); ctx.fill(); }
+    // player
+    ctx.fillStyle = '#ff0'; ctx.beginPath(); ctx.arc(player.x, player.y, 10, 0, Math.PI*2); ctx.fill();
+    ctx.strokeStyle = '#ff0'; ctx.beginPath(); ctx.moveTo(player.x, player.y); ctx.lineTo(player.x + Math.cos(player.ang) * 40, player.y + Math.sin(player.ang) * 40); ctx.stroke();
+    ctx.restore();
+  }
+
+  // ---------- Utilities ----------
+  function shadeColor(hex, factor){
+    const n = parseInt(hex.slice(1), 16);
+    const r = Math.floor(((n>>16)&255) * factor);
+    const g = Math.floor(((n>>8)&255) * factor);
+    const b = Math.floor((n&255) * factor);
+    return `rgb(${Math.max(0,r)},${Math.max(0,g)},${Math.max(0,b)})`;
+  }
+
+  // ---------- Update UI ----------
+  function updateUI(){
+    hpInner.style.transform = `scaleX(${Math.max(0, player.hp) / 100})`;
+    if (player.reloading) ammoText.textContent = `Reloading...`;
+    else ammoText.textContent = `Ammo: ${player.ammo} / ${MAX_AMMO}`;
+  }
+
+  // ---------- Main loop ----------
+  let last = performance.now();
+  function loop(now){
+    const dt = Math.min(0.05, (now - last) / 1000); last = now;
+
+    // movement
+    const speed = 150 * dt;
+    const cos = Math.cos(player.ang), sin = Math.sin(player.ang);
+    // forward/back
+    if (keys['KeyW']) tryMove(cos * speed, sin * speed);
+    if (keys['KeyS']) tryMove(-cos * speed, -sin * speed);
+    // strafe left/right
+    if (keys['KeyA']) tryMove(-sin * speed, cos * speed);
+    if (keys['KeyD']) tryMove(sin * speed, -cos * speed);
+    // turn
+    if (keys['ArrowLeft']) player.ang -= 2.6 * dt;
+    if (keys['ArrowRight']) player.ang += 2.6 * dt;
+    // touch move
+    if (touchMove.active){
+      const jx = touchMove.x, jy = -touchMove.y;
+      const mag = Math.hypot(jx, jy);
+      if (mag > 0.12){
+        const ang = Math.atan2(jy, jx) + player.ang;
+        const sp = speed * Math.min(1, mag*1.2);
+        tryMove(Math.cos(ang) * sp, Math.sin(ang) * sp);
+      }
+    }
+
+    // shooting input
+    if ((keys['Space'] && !keys._spacePrev) || keys['Mouse0']){ playerFire(); } // mouse handled separately
+    keys._spacePrev = !!keys['Space'];
+
+    // reload if requested (R)
+    if (keys['KeyR']){ startReload(); keys['KeyR'] = false; }
+
+    // update enemies & bullets & particles
+    updateEnemies(dt);
+    updateBullets(dt);
+    updateParticles(dt);
+
+    // flash decay
+    if (flashTimer > 0){
+      flashTimer -= dt;
+      if (flashTimer <= 0) flashEl.style.background = 'rgba(255,0,0,0)';
+    }
+
+    // check level complete
+    if (enemies.filter(e => e.alive).length === 0){
+      // small delay to move to next level
+      loadLevel(currentLevel + 1);
+    }
+
+    // render
+    render();
+
+    // UI
+    updateUI();
+
+    requestAnimationFrame(loop);
+  }
+
+  // ---------- Mouse firing support (left click) ----------
+  let mouseDown = false;
+  canvas.addEventListener('mousedown', e => {
+    if (e.button === 0) { mouseDown = true; playerFire(); }
+  });
+  window.addEventListener('mouseup', e => { if (e.button === 0) mouseDown = false; });
+
+  function playerFire(){
+    // left click or space triggers immediate shot
+    playerFireInternal();
+  }
+  function playerFireInternal(){
+    if (player.reloading) return;
+    if (player.ammo <= 0){ startReload(); return; }
+    // shoot
+    player.ammo--;
+    // visual projectile (approx)
+    const angle = player.ang + (Math.random() - 0.5) * 0.005;
+    playerBullets.push({ x: player.x + Math.cos(angle)*16, y: player.y + Math.sin(angle)*16, vx: Math.cos(angle) * 1100, vy: Math.sin(angle) * 1100, life: 0.7 });
+    // hitscan enemy
+    for (let e of enemies){
+      if (!e.alive) continue;
+      const dx = e.x - player.x, dy = e.y - player.y;
+      const dist = Math.hypot(dx, dy);
+      const angTo = Math.atan2(dy, dx);
+      let rel = angTo - angle; rel = ((rel + Math.PI) % (2*Math.PI)) - Math.PI;
+      if (Math.abs(rel) < 0.25 && dist < 900 && hasLineOfSight(player.x, player.y, e.x, e.y)){
+        e.hp -= 40;
+        spawnImpact(e.x, e.y, angTo, '#ffb3b3');
+        if (e.hp <= 0) e.alive = false;
+        break;
+      }
+    }
+    updateUI();
+  }
+
+  // alias to keep consistent naming (some older code used playerFire)
+  const playerFire = playerFireInternal;
+
+  // ---------- Start ----------
+  // position & UI
+  loadLevel(0);
+  updateUI();
+  requestAnimationFrame(loop);
+
+  // expose debug
+  window.__mini = { player, enemies, enemyBullets, playerBullets, particles, loadLevel };
+
+  // ensure pointer lock resume audio or interactions on first touch (if later needed)
+  window.addEventListener('pointerdown', ()=>{ /* placeholder */ }, { once: true });
+
+})();
+</script>
+</body>
+</html>
