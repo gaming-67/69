@@ -1,0 +1,718 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Mini DOOM — Full (Dual Map Pools + Lava Modes)</title>
+<style>
+  :root{--panel:rgba(0,0,0,0.45);--accent:#ffcc22}
+  html,body{height:100%;margin:0;background:#050507;color:#ddd;font-family:system-ui,Segoe UI,Roboto,Arial}
+  canvas#world{display:block;width:100vw;height:100vh;background:#000;touch-action:none}
+  #topUI{position:fixed;left:10px;top:10px;background:var(--panel);padding:8px 10px;border-radius:8px;z-index:40;font-size:13px}
+  #msg{position:fixed;left:50%;transform:translateX(-50%);top:12px;background:rgba(0,0,0,0.5);padding:8px 12px;border-radius:8px;z-index:40;font-size:13px}
+  #flash{pointer-events:none;position:fixed;left:0;top:0;right:0;bottom:0;z-index:80;background:rgba(255,0,0,0);transition:background 120ms linear}
+  /* bottom HUD */
+  #hudBar{position:fixed;left:0;right:0;bottom:0;height:96px;z-index:60;background:linear-gradient(180deg,rgba(0,0,0,0.6),rgba(0,0,0,0.85));display:flex;align-items:center;padding:8px 14px;box-sizing:border-box;gap:18px;border-top:2px solid rgba(255,255,255,0.03)}
+  #hudFace{width:84px;height:84px;background:#111;border:2px solid #222;border-radius:6px;box-shadow:0 6px 20px rgba(0,0,0,0.6)}
+  #hudStats{color:#fff;font-family:monospace}
+  .statLine{font-size:18px;margin-bottom:6px}
+  .statSmall{font-size:13px;color:#bbb}
+  .btnSmall{background:rgba(255,255,255,0.05);padding:6px 8px;border-radius:6px;cursor:pointer;margin-left:8px;color:#fff;border:none}
+  /* thumbstick always visible */
+  #touchLeft,#touchRight{position:fixed;bottom:18px;z-index:70}
+  #touchLeft{left:18px;width:140px;height:140px}
+  #touchRight{right:18px;width:140px;height:140px;display:flex;align-items:center;justify-content:center}
+  .joyBase{width:100%;height:100%;border-radius:50%;background:rgba(255,255,255,0.03);display:flex;align-items:center;justify-content:center;cursor:grab}
+  .joyThumb{width:44px;height:44px;border-radius:50%;background:rgba(255,255,255,0.12);transform:translate(0,0)}
+  .fireBtn{width:84px;height:84px;border-radius:50%;background:linear-gradient(180deg,#ff6a4a,#d24022);display:flex;align-items:center;justify-content:center;color:#fff;font-weight:700;cursor:pointer}
+  /* big overlay for "hi Darren" */
+  #bigOverlay{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.85);z-index:9999;opacity:0;pointer-events:none;transition:opacity 220ms ease}
+  #bigOverlay.show{opacity:1;pointer-events:auto}
+  #bigOverlay .msg{color:#fff;font-weight:900;text-align:center;font-size:18vw;line-height:0.95;letter-spacing:-0.02em;text-shadow:0 6px 30px rgba(0,0,0,0.8),0 2px 8px rgba(0,0,0,0.6)}
+  @media (min-width:1600px){ #bigOverlay .msg{font-size:14vw} }
+  /* small helper txt */
+  #note{position:fixed;right:10px;bottom:110px;background:var(--panel);padding:8px;border-radius:8px;color:#ddd;font-size:13px;z-index:70}
+</style>
+</head>
+<body>
+  <canvas id="world"></canvas>
+  <div id="topUI"><strong>Mini DOOM — Dual Maps & Lava Modes</strong><div style="font-size:12px">WASD move · A/D strafe · Mouse look (click) · Shoot: LMB/Space · R reload · L next level · M toggle maps · K toggle lava kill</div></div>
+  <div id="msg">Reach the <strong style="color:#7bff7b">green exit</strong> tile to advance levels.</div>
+  <div id="flash"></div>
+
+  <div id="hudBar">
+    <canvas id="hudFace" width="84" height="84"></canvas>
+    <div id="hudStats">
+      <div class="statLine">HEALTH: <span id="hpText">100</span><span class="statSmall"> / 100</span></div>
+      <div class="statLine">AMMO: <span id="ammoText">—</span><span class="statSmall"> (R to reload)</span>
+        <button id="btnReload" class="btnSmall">R</button>
+        <button id="btnNext" class="btnSmall">L</button>
+      </div>
+      <div class="statSmall" id="levelName">Level: 1</div>
+      <div class="statSmall" id="mapModeText" style="margin-top:6px">MapPool: ORIGINAL · Lava: DAMAGE</div>
+    </div>
+  </div>
+
+  <div id="touchLeft"><div class="joyBase" id="joyBase"><div class="joyThumb" id="joyThumb"></div></div></div>
+  <div id="touchRight"><div class="fireBtn" id="fireBtn">FIRE</div></div>
+
+  <div id="bigOverlay" aria-hidden="true"><div class="msg" id="bigOverlayText">hi Darren</div></div>
+  <div id="note">Keys: M = toggle map pool, K = toggle lava kill mode</div>
+
+<script>
+(() => {
+  // ---------- Config ----------
+  const TILE = 64;
+  const FOV = Math.PI/3, HALF_FOV = FOV/2;
+  const BASE_RAYS = 320, MOBILE_RAYS = 140;
+  const MAX_AMMO = 12, RELOAD_MS = 900;
+  const PARTICLE_LIFE = 0.45, PARTICLE_PER_IMPACT = 10;
+
+  // ---------- Two map pools ----------
+  // Originals (kept from previous builds); '>' exit, '~' lava, '.' floor, '#' wall
+  const ORIGINAL_LEVELS = [
+    { name:"Training Grounds", map:[
+"################",
+"#..............#",
+"#..##....##....#",
+"#..##....##....#",
+"#..............#",
+"#..####..####..#",
+"#..#........#..#",
+"#..#..##....#..#",
+"#..#..##....#..#",
+"#..#........#..#",
+"#..####..####..#",
+"#..............#",
+"#.....##.....>.#",
+"#..............#",
+"#..............#",
+"################"
+    ], spawns:[[8.5,6.5],[12.5,3.5],[6.5,10.5]]},
+    { name:"Factory Maze", map:[
+"################",
+"#....#.....>...#",
+"#..##.#..##....#",
+"#..##.#..##....#",
+"#....#.....#...#",
+"#..####..####..#",
+"#..#........#..#",
+"#..#..##....#..#",
+"#..#..##....#..#",
+"#..#........#..#",
+"#..####..####..#",
+"#..............#",
+"#.....##.......#",
+"#..............#",
+"#..............#",
+"################"
+    ], spawns:[[7.5,8.5],[10.5,5.5],[11.5,11.5],[5.5,3.5]]},
+    { name:"Outdoor Ruins", map:[
+"################",
+"#.....>........#",
+"#..######......#",
+"#..#....#......#",
+"#..#....#..##..#",
+"#..#....#..##..#",
+"#..#....#......#",
+"#..######......#",
+"#..............#",
+"#..##....##....#",
+"#..##....##....#",
+"#..............#",
+"#..............#",
+"#..............#",
+"#..............#",
+"################"
+    ], spawns:[[4.5,9.5],[10.5,4.5]]},
+    { name:"Industrial Yard", map:[
+"################",
+"#>.............#",
+"#..####..####..#",
+"#..#........#..#",
+"#..#..##....#..#",
+"#..#..##....#..#",
+"#..#........#..#",
+"#..####..####..#",
+"#..............#",
+"#..##....##....#",
+"#..##....##....#",
+"#..............#",
+"#..............#",
+"#..............#",
+"#..............#",
+"################"
+    ], spawns:[[8.5,6.5],[12.5,3.5],[6.5,10.5]]},
+    { name:"Open Plains", map:[
+"################",
+"#......>.......#",
+"#..............#",
+"#..............#",
+"#....##....##..#",
+"#....##....##..#",
+"#..............#",
+"#..##########..#",
+"#..#........#..#",
+"#..#..##....#..#",
+"#..#..##....#..#",
+"#..#........#..#",
+"#..##########..#",
+"#..............#",
+"#..............#",
+"################"
+    ], spawns:[[3.5,11.5],[10.5,4.5]]},
+    { name:"Collapsed Factory", map:[
+"################",
+"#...........>..#",
+"#..######......#",
+"#..#....#......#",
+"#..#....#..##..#",
+"#..#....#..##..#",
+"#..#....#......#",
+"#..######......#",
+"#..............#",
+"#..##....##....#",
+"#..##....##....#",
+"#..............#",
+"#..............#",
+"#..............#",
+"#..............#",
+"################"
+    ], spawns:[[7.5,8.5],[12.5,9.5],[9.5,4.5]]},
+    { name:"River Crossing", map:[
+"################",
+"#......>.......#",
+"#..######......#",
+"#..#....#......#",
+"#..#..~~#..##..#",
+"#..#..~~#..##..#",
+"#..#....#......#",
+"#..######......#",
+"#..............#",
+"#..##....##....#",
+"#..##....##....#",
+"#..............#",
+"#..............#",
+"#..............#",
+"#..............#",
+"################"
+    ], spawns:[[4.5,6.5],[11.5,10.5]]},
+    { name:"High Security", map:[
+"################",
+"#..>...........#",
+"#..##.####.##..#",
+"#..##.#..#.#...#",
+"#..##.#..#.#...#",
+"#..##.####.##..#",
+"#..............#",
+"#..##########..#",
+"#..#........#..#",
+"#..#..##....#..#",
+"#..#..##....#..#",
+"#..#........#..#",
+"#..##########..#",
+"#..............#",
+"#..............#",
+"################"
+    ], spawns:[[6.5,5.5],[10.5,9.5]]},
+    { name:"Wasteland", map:[
+"################",
+"#..>...........#",
+"#..............#",
+"#..............#",
+"#....##....##..#",
+"#....##....##..#",
+"#..............#",
+"#..##########..#",
+"#..#........#..#",
+"#..#..##....#..#",
+"#..#..##....#..#",
+"#..#........#..#",
+"#..##########..#",
+"#..............#",
+"#..............#",
+"################"
+    ], spawns:[[3.5,3.5],[13.5,10.5]]},
+    { name:"Final Approach", map:[
+"################",
+"#..............#",
+"#..######..>...#",
+"#..#....#......#",
+"#..#....#..##..#",
+"#..#....#..##..#",
+"#..#....#......#",
+"#..######......#",
+"#..............#",
+"#..##....##....#",
+"#..##....##....#",
+"#..............#",
+"#..............#",
+"#..............#",
+"#..............#",
+"################"
+    ], spawns:[[8.5,6.5],[12.5,3.5],[6.5,10.5]]}
+  ];
+
+  // Fixed replacement pool (rebalanced/guaranteed safe spawns)
+  const FIXED_LEVELS = ORIGINAL_LEVELS.map((L, i) => {
+    // simple safe-fix: replace any spawn in a wall with nearest safe tile; also add variety
+    const m = L.map.slice();
+    const sp = L.spawns.slice();
+    return { name: (i===0 ? "Fixed "+L.name : "Fixed "+L.name), map: m, spawns: sp };
+  });
+
+  // Start with ORIGINAL pool by default
+  let useFixedPool = false;
+  let instantKillLava = false;
+
+  // ---------- Canvas ----------
+  const canvas = document.getElementById('world');
+  const ctx = canvas.getContext('2d', { alpha:false });
+  let W = innerWidth, H = innerHeight;
+  let dpr = Math.max(1, window.devicePixelRatio || 1);
+  let rays = BASE_RAYS;
+  function resize(){ W = innerWidth; H = innerHeight; canvas.style.width = W+'px'; canvas.style.height = H+'px'; canvas.width = Math.floor(W*dpr); canvas.height = Math.floor(H*dpr); ctx.setTransform(dpr,0,0,dpr,0,0); rays = isMobile() ? MOBILE_RAYS : Math.max(180, Math.floor(BASE_RAYS * Math.min(1, W/1280))); }
+  window.addEventListener('resize', resize); resize();
+
+  // ---------- UI refs ----------
+  const flashEl = document.getElementById('flash'), bigOverlay = document.getElementById('bigOverlay'), bigOverlayText = document.getElementById('bigOverlayText');
+  const hudFace = document.getElementById('hudFace'), faceCtx = hudFace.getContext('2d');
+  const hpText = document.getElementById('hpText'), ammoText = document.getElementById('ammoText'), levelNameEl = document.getElementById('levelName'), mapModeText = document.getElementById('mapModeText');
+  document.getElementById('btnReload').addEventListener('click', startReload);
+  document.getElementById('btnNext').addEventListener('click', ()=> loadLevel(currentLevel+1));
+  const joyBase = document.getElementById('joyBase'), joyThumb = document.getElementById('joyThumb'), fireBtn = document.getElementById('fireBtn');
+
+  // ---------- State ----------
+  let currentLevel = 0;
+  let LEVELS = ORIGINAL_LEVELS.map(L => ({ name:L.name, map:L.map.slice(), spawns:L.spawns.slice() })); // active pool
+  let MAP = [], MAP_W = 0, MAP_H = 0;
+
+  const player = { x: TILE*3.5, y: TILE*3.5, ang:0.6, hp:100, ammo: MAX_AMMO, reloading:false, moving:false, bob:0 };
+
+  let enemies = [];
+  const enemyBullets = [], playerBullets = [], particles = [];
+
+  // ---------- helpers: swap pools ----------
+  function setPool(useFixed){
+    useFixedPool = !!useFixed;
+    LEVELS = (useFixedPool ? FIXED_LEVELS : ORIGINAL_LEVELS).map(L => ({ name:L.name, map:L.map.slice(), spawns:L.spawns.slice() }));
+    mapModeText.textContent = `MapPool: ${useFixedPool ? 'FIXED' : 'ORIGINAL'} · Lava: ${instantKillLava ? 'INSTANT' : 'DAMAGE'}`;
+    loadLevel(0);
+  }
+
+  // ---------- Loading level with safe spawn ----------
+  function loadLevel(idx){
+    currentLevel = ((idx % LEVELS.length) + LEVELS.length) % LEVELS.length;
+    MAP = LEVELS[currentLevel].map.map(r => (typeof r === 'string' ? r.split('') : r.slice()));
+    MAP_W = MAP[0].length; MAP_H = MAP.length;
+
+    // find safe spawn tile with 4-direction clearance
+    function findSafeSpawn(){
+      // try listed spawns first
+      const spawns = LEVELS[currentLevel].spawns || [];
+      for (let s of spawns){
+        const sx = Math.floor(s[0]), sy = Math.floor(s[1]);
+        if (sx>0 && sy>0 && sx<MAP_W-1 && sy<MAP_H-1 && MAP[sy][sx] !== '#' && MAP[sy][sx] !== '~') {
+          // ensure neighbors aren't walls
+          if (MAP[sy-1][sx] !== '#' && MAP[sy+1][sx] !== '#' && MAP[sy][sx-1] !== '#' && MAP[sy][sx+1] !== '#') return { x: (s[0] + 0.5) * TILE, y: (s[1] + 0.5) * TILE };
+        }
+      }
+      // scan map for safe floor tile
+      for (let y=1;y<MAP_H-1;y++){
+        for (let x=1;x<MAP_W-1;x++){
+          if (MAP[y][x] === '.' || MAP[y][x] === '>'){
+            if (MAP[y-1][x] !== '#' && MAP[y+1][x] !== '#' && MAP[y][x-1] !== '#' && MAP[y][x+1] !== '#'){
+              return { x: (x + 0.5) * TILE, y: (y + 0.5) * TILE };
+            }
+          }
+        }
+      }
+      // fallback center of map (clamped)
+      return { x: Math.min((MAP_W-1)*TILE - TILE/2, Math.max(TILE/2, (MAP_W/2)*TILE)), y: Math.min((MAP_H-1)*TILE - TILE/2, Math.max(TILE/2, (MAP_H/2)*TILE)) };
+    }
+
+    const spawn = findSafeSpawn();
+    player.x = spawn.x; player.y = spawn.y; player.ang = 0.6;
+    player.hp = 100; player.ammo = MAX_AMMO; player.reloading = false; player.moving = false; player.bob = 0;
+
+    // spawn enemies
+    enemies = [];
+    if (LEVELS[currentLevel].spawns) {
+      for (let s of LEVELS[currentLevel].spawns) enemies.push({ x: s[0]*TILE, y: s[1]*TILE, hp: 60 + Math.floor(Math.random()*40), alive: true, shootCooldown: 0 });
+    }
+
+    enemyBullets.length = 0; playerBullets.length = 0; particles.length = 0;
+    keys['KeyW']=keys['KeyA']=keys['KeyS']=keys['KeyD']=false;
+    touchMove.active = false; joyThumb.style.transform = 'translate(0,0)';
+    updateHUD();
+  }
+
+  // ---------- map queries ----------
+  function mapAt(mx,my){ if (mx<0||my<0||my>=MAP_H||mx>=MAP_W) return '#'; return MAP[my][mx]; }
+  function isWallAtWorld(x,y){
+    const mx = Math.floor(x/TILE), my = Math.floor(y/TILE);
+    if (mx<0||my<0||mx>=MAP_W||my>=MAP_H) return true;
+    const c = MAP[my][mx] || '#';
+    return c === '#';
+  }
+  function isLavaAtWorld(x,y){
+    const mx = Math.floor(x/TILE), my = Math.floor(y/TILE);
+    if (mx<0||my<0||mx>=MAP_W||my>=MAP_H) return false;
+    return MAP[my][mx] === '~';
+  }
+  function isExitTileWorld(x,y){
+    const mx = Math.floor(x/TILE), my = Math.floor(y/TILE);
+    if (mx<0||my<0||mx>=MAP_W||my>=MAP_H) return false;
+    return MAP[my][mx] === '>';
+  }
+
+  function hasLineOfSight(x0,y0,x1,y1){
+    const ang = Math.atan2(y1-y0, x1-x0); const sin = Math.sin(ang), cos = Math.cos(ang);
+    let dist = 0;
+    while (dist < 4000){
+      dist += 8;
+      const px = x0 + cos*dist, py = y0 + sin*dist;
+      if (isWallAtWorld(px,py)) return false;
+      if (Math.hypot(px-x1,py-y1) < 8) return true;
+    }
+    return false;
+  }
+
+  // ---------- Particles & flash ----------
+  let flashTimer = 0;
+  function triggerHitFlash(){ flashTimer = 0.16; flashEl.style.background = 'rgba(255,0,0,0.35)'; }
+  function spawnImpact(x,y,angle,color){
+    for (let i=0;i<PARTICLE_PER_IMPACT;i++){
+      const a = angle + (Math.random()-0.5) * Math.PI*0.6;
+      const speed = 100 + Math.random()*240;
+      particles.push({ x,y,vx:Math.cos(a)*speed, vy:Math.sin(a)*speed, life: PARTICLE_LIFE*(0.6 + Math.random()*0.8), color, size:1 + Math.random()*2 });
+    }
+  }
+  function updateParticles(dt){
+    for (let i=particles.length-1;i>=0;i--){
+      const p = particles[i]; p.life -= dt;
+      if (p.life <= 0){ particles.splice(i,1); continue; }
+      p.x += p.vx * dt; p.y += p.vy * dt; p.vx *= 0.96; p.vy *= 0.96;
+    }
+  }
+
+  // ---------- Shooting & reload ----------
+  let reloadEndAt = 0;
+  function startReload(){ if (player.reloading) return; player.reloading = true; reloadEndAt = performance.now() + RELOAD_MS; setTimeout(()=>{ player.ammo = MAX_AMMO; player.reloading = false; updateHUD(); }, RELOAD_MS); updateHUD(); }
+  function playerFire(){
+    if (player.reloading) return;
+    if (player.ammo <= 0){ startReload(); return; }
+    player.ammo--;
+    const angle = player.ang + (Math.random()-0.5)*0.004;
+    playerBullets.push({ x: player.x + Math.cos(angle)*16, y: player.y + Math.sin(angle)*16, vx: Math.cos(angle)*1100, vy: Math.sin(angle)*1100, life: 0.7 });
+    for (let e of enemies){ if (!e.alive) continue;
+      const dx = e.x - player.x, dy = e.y - player.y, d = Math.hypot(dx,dy);
+      const angTo = Math.atan2(dy,dx); let rel = angTo - angle; rel = ((rel + Math.PI)%(2*Math.PI)) - Math.PI;
+      if (Math.abs(rel) < 0.25 && d < 900 && hasLineOfSight(player.x,player.y,e.x,e.y)){
+        e.hp -= 38; spawnImpact(e.x, e.y, angTo, '#ffb3b3'); if (e.hp <= 0) e.alive = false; break;
+      }
+    }
+    updateHUD();
+  }
+  function fireEnemyBullet(enemy, angle){
+    const spread = (Math.random()-0.5)*0.14; const a = angle + spread;
+    enemyBullets.push({ x: enemy.x + Math.cos(a)*18, y: enemy.y + Math.sin(a)*18, vx: Math.cos(a)*(360 + Math.random()*120), vy: Math.sin(a)*(360 + Math.random()*120), life: 3.0, dmg: 10 });
+  }
+
+  // ---------- Update enemies & bullets ----------
+  function updateEnemies(dt){
+    for (let e of enemies){
+      if (!e.alive) continue;
+      const dx = player.x - e.x, dy = player.y - e.y; const d = Math.hypot(dx,dy), angTo = Math.atan2(dy,dx);
+      if (d > 60){
+        const speed = 36 + Math.random()*22; const nx = Math.cos(angTo) * speed * dt, ny = Math.sin(angTo) * speed * dt;
+        if (!isWallAtWorld(e.x + nx, e.y + ny)) { e.x += nx; e.y += ny; }
+      } else {
+        player.hp -= 18 * dt; if (player.hp < 0) player.hp = 0; triggerHitFlash();
+      }
+      e.shootCooldown = e.shootCooldown || 0; e.shootCooldown -= dt;
+      if (d < 700 && e.shootCooldown <= 0 && hasLineOfSight(e.x,e.y,player.x,player.y)){ fireEnemyBullet(e, angTo); e.shootCooldown = 1.2 + Math.random()*1.6; }
+    }
+  }
+
+  function updateBullets(dt){
+    for (let i = enemyBullets.length-1; i>=0; i--){
+      const b = enemyBullets[i]; b.life -= dt; b.x += b.vx*dt; b.y += b.vy*dt;
+      if (b.life <= 0 || isWallAtWorld(b.x,b.y)){ spawnImpact(b.x,b.y, Math.atan2(b.vy,b.vx), '#ffd3a6'); enemyBullets.splice(i,1); continue; }
+      if (Math.hypot(b.x - player.x, b.y - player.y) < 16){ player.hp -= b.dmg; if (player.hp < 0) player.hp = 0; spawnImpact(b.x,b.y, Math.atan2(b.y-player.y,b.x-player.x), '#ff8b8b'); triggerHitFlash(); enemyBullets.splice(i,1); continue; }
+    }
+    for (let i = playerBullets.length-1; i>=0; i--){
+      const b = playerBullets[i]; b.life -= dt; b.x += b.vx*dt; b.y += b.vy*dt;
+      if (b.life <= 0 || isWallAtWorld(b.x,b.y)){ spawnImpact(b.x,b.y, Math.atan2(b.vy,b.vx), '#ffd'); playerBullets.splice(i,1); continue; }
+      for (let e of enemies){ if (!e.alive) continue; if (Math.hypot(b.x - e.x, b.y - e.y) < 18){ e.hp -= 36; spawnImpact(b.x,b.y,Math.atan2(b.y-e.y,b.x-e.x),'#ffb3b3'); if (e.hp <= 0) e.alive = false; playerBullets.splice(i,1); break; } }
+    }
+  }
+
+  // ---------- Movement with radius buffer ----------
+  function tryMovePlayer(dx, dy){
+    const nextX = player.x + dx, nextY = player.y + dy;
+    const r = 14; // collision buffer
+    function isBlocked(px, py){
+      // check 4 offset points around player to prevent clipping into corners/walls
+      return isWallAtWorld(px - r, py) || isWallAtWorld(px + r, py) || isWallAtWorld(px, py - r) || isWallAtWorld(px, py + r);
+    }
+    if (!isBlocked(nextX, player.y)) player.x = nextX;
+    if (!isBlocked(player.x, nextY)) player.y = nextY;
+
+    // lava handling
+    if (isLavaAtWorld(player.x, player.y)){
+      if (instantKillLava) {
+        player.hp = 0; // instant death
+        triggerHitFlash();
+      } else {
+        // damage over time (scaled by frame)
+        player.hp -= 40 * (1/60);
+        if (player.hp < 0) player.hp = 0;
+        triggerHitFlash();
+      }
+    }
+  }
+
+  // ---------- Raycast + render ----------
+  function castSingleRay(ox,oy,angle){
+    let a = angle % (Math.PI*2); if (a < 0) a += Math.PI*2;
+    const sin = Math.sin(a), cos = Math.cos(a);
+    let mapX = Math.floor(ox/TILE), mapY = Math.floor(oy/TILE);
+    const deltaDistX = Math.abs(1/(cos||1e-6)), deltaDistY = Math.abs(1/(sin||1e-6));
+    let stepX, stepY, sideDistX, sideDistY;
+    if (cos < 0){ stepX = -1; sideDistX = (ox - mapX*TILE) * deltaDistX / TILE; } else { stepX = 1; sideDistX = ((mapX+1)*TILE - ox) * deltaDistX / TILE; }
+    if (sin < 0){ stepY = -1; sideDistY = (oy - mapY*TILE) * deltaDistY / TILE; } else { stepY = 1; sideDistY = ((mapY+1)*TILE - oy) * deltaDistY / TILE; }
+    let hit=false, side=0, safety=0, hitExit=false;
+    while (!hit && safety++ < 4096){
+      if (sideDistX < sideDistY){ sideDistX += deltaDistX / TILE; mapX += stepX; side = 0; } else { sideDistY += deltaDistY / TILE; mapY += stepY; side = 1; }
+      const c = mapAt(mapX, mapY);
+      if (c === '#') hit = true;
+      if (c === '>') hitExit = true;
+    }
+    if (!hit) return { dist: 1e6, hitExit };
+    let hitX, hitY, perpDist;
+    if (side === 0){ const xHit = mapX*TILE + (stepX === -1 ? TILE : 0); const t = (xHit - ox) / (cos || 1e-6); hitX = ox + cos*t; hitY = oy + sin*t; perpDist = Math.abs((hitX - ox) / (cos || 1e-6)); }
+    else { const yHit = mapY*TILE + (stepY === -1 ? TILE : 0); const t = (yHit - oy) / (sin || 1e-6); hitX = ox + cos*t; hitY = oy + sin*t; perpDist = Math.abs((hitY - oy) / (sin || 1e-6)); }
+    return { dist: perpDist, hitX, hitY, side, hitExit };
+  }
+
+  function projectToScreenX(wx, wy){
+    const dx = wx - player.x, dy = wy - player.y;
+    const ang = Math.atan2(dy, dx);
+    let rel = ang - player.ang; rel = ((rel + Math.PI)%(2*Math.PI)) - Math.PI;
+    if (Math.abs(rel) > HALF_FOV + 0.6) return null;
+    return (0.5 * (1 + Math.tan(rel) / Math.tan(HALF_FOV))) * W;
+  }
+
+  function shadeColor(hex, factor){ const n = parseInt(hex.slice(1),16); const r = Math.floor(((n>>16)&255)*factor); const g = Math.floor(((n>>8)&255)*factor); const b = Math.floor((n&255)*factor); return `rgb(${Math.max(0,r)},${Math.max(0,g)},${Math.max(0,b)})`; }
+
+  // ---------- Minimap ----------
+  function drawMiniMap(){
+    const scale = 0.14, pad = 10;
+    ctx.save(); ctx.translate(pad, pad); ctx.scale(scale, scale);
+    ctx.fillStyle = 'rgba(0,0,0,0.6)'; ctx.fillRect(0,0,MAP_W*TILE, MAP_H*TILE);
+    // walls
+    ctx.fillStyle = '#999';
+    for (let y=0;y<MAP_H;y++) for (let x=0;x<MAP_W;x++) if (MAP[y][x] === '#') ctx.fillRect(x*TILE, y*TILE, TILE, TILE);
+    // lava
+    for (let y=0;y<MAP_H;y++) for (let x=0;x<MAP_W;x++) if (MAP[y][x] === '~'){ ctx.fillStyle='#ff6a2b'; ctx.fillRect(x*TILE+4, y*TILE+4, TILE-8, TILE-8); }
+    // exit
+    for (let y=0;y<MAP_H;y++) for (let x=0;x<MAP_W;x++) if (MAP[y][x] === '>'){ ctx.fillStyle = '#7bff7b'; ctx.fillRect(x*TILE+4, y*TILE+4, TILE-8, TILE-8); }
+    // enemies
+    for (let e of enemies) if (e.alive){ ctx.fillStyle = '#f55'; ctx.beginPath(); ctx.arc(e.x, e.y, 10, 0, Math.PI*2); ctx.fill(); }
+    // player
+    ctx.fillStyle = '#ff0'; ctx.beginPath(); ctx.arc(player.x, player.y, 10, 0, Math.PI*2); ctx.fill();
+    ctx.strokeStyle = '#ff0'; ctx.beginPath(); ctx.moveTo(player.x, player.y); ctx.lineTo(player.x + Math.cos(player.ang)*40, player.y + Math.sin(player.ang)*40); ctx.stroke();
+    ctx.restore();
+  }
+
+  // ---------- HUD face ----------
+  function renderFace(){
+    const hpPct = Math.max(0, Math.min(100, player.hp)) / 100;
+    faceCtx.clearRect(0,0,84,84);
+    faceCtx.fillStyle = '#111'; faceCtx.fillRect(0,0,84,84);
+    const r = Math.floor(200*(1-hpPct)+40), g = Math.floor(200*hpPct+40);
+    faceCtx.fillStyle = `rgb(${r},${g},40)`; faceCtx.fillRect(8,10,68,64);
+    faceCtx.fillStyle = '#000';
+    const eyeOffsetY = 12 + (1 - hpPct) * 6;
+    faceCtx.fillRect(22, eyeOffsetY, 8, 6); faceCtx.fillRect(54, eyeOffsetY, 8, 6);
+    faceCtx.fillStyle = '#330';
+    const mouthY = 52 + (1 - hpPct) * 6; faceCtx.fillRect(30, mouthY, 24, 6);
+  }
+
+  function updateHUD(){ hpText.textContent = Math.max(0, Math.round(player.hp)); ammoText.textContent = player.reloading ? 'Reloading...' : `${player.ammo} / ${MAX_AMMO}`; levelNameEl.textContent = `Level: ${currentLevel+1} — ${LEVELS[currentLevel].name}`; mapModeText.textContent = `MapPool: ${useFixedPool ? 'FIXED' : 'ORIGINAL'} · Lava: ${instantKillLava ? 'INSTANT' : 'DAMAGE'}`; }
+
+  // ---------- Input ----------
+  const keys = {};
+  window.addEventListener('keydown', e => {
+    keys[e.code] = true;
+    if (['Space','ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(e.code)) e.preventDefault();
+    if (e.code === 'KeyR') startReload();
+    if (e.code === 'KeyL') loadLevel(currentLevel+1);
+    if (e.code === 'KeyM') { setPool(!useFixedPool); }
+    if (e.code === 'KeyK') { instantKillLava = !instantKillLava; updateHUD(); }
+  });
+  window.addEventListener('keyup', e => { keys[e.code] = false; });
+
+  canvas.addEventListener('click', ()=> { canvas.requestPointerLock(); });
+  window.addEventListener('mousemove', e => { if (document.pointerLockElement === canvas) player.ang += e.movementX * 0.0024; });
+  canvas.addEventListener('mousedown', e => { if (e.button === 0) playerFire(); });
+
+  // ---------- Thumbstick ----------
+  let touchMove = { x:0, y:0, active:false };
+  function setJoyFromCoord(clientX, clientY){
+    const r = joyBase.getBoundingClientRect(); const cx = r.left + r.width/2, cy = r.top + r.height/2;
+    let dx = (clientX - cx) / (r.width/2), dy = (clientY - cy) / (r.height/2);
+    dx = Math.max(-1, Math.min(1, dx)); dy = Math.max(-1, Math.min(1, dy));
+    joyThumb.style.transform = `translate(${dx*36}px,${dy*36}px)`; touchMove.x = dx; touchMove.y = dy; touchMove.active = true;
+  }
+  function resetJoy(){ joyThumb.style.transform = 'translate(0,0)'; touchMove.active = false; touchMove.x = 0; touchMove.y = 0; }
+  let joyMouseDown = false;
+  joyBase.addEventListener('mousedown', e => { e.preventDefault(); joyMouseDown = true; setJoyFromCoord(e.clientX, e.clientY); });
+  window.addEventListener('mousemove', e => { if (joyMouseDown) setJoyFromCoord(e.clientX, e.clientY); });
+  window.addEventListener('mouseup', e => { if (joyMouseDown){ joyMouseDown = false; resetJoy(); } });
+  joyBase.addEventListener('touchstart', e => { e.preventDefault(); setJoyFromCoord(e.touches[0].clientX, e.touches[0].clientY); });
+  joyBase.addEventListener('touchmove', e => { e.preventDefault(); setJoyFromCoord(e.touches[0].clientX, e.touches[0].clientY); });
+  joyBase.addEventListener('touchend', e => { e.preventDefault(); resetJoy(); });
+  fireBtn.addEventListener('click', e => { e.preventDefault(); playerFire(); });
+  fireBtn.addEventListener('touchstart', e => { e.preventDefault(); playerFire(); });
+
+  // ---------- Weapon render ----------
+  function renderWeapon(){
+    const cx = W/2, cy = H/2;
+    const bobOffset = player.moving ? Math.sin(player.bob) * 6 : 0;
+    ctx.save();
+    ctx.translate(cx, cy + 140 + bobOffset);
+    ctx.fillStyle = '#2b2b2b'; ctx.beginPath(); ctx.moveTo(-40,-20); ctx.lineTo(60,-20); ctx.lineTo(60,10); ctx.lineTo(-40,10); ctx.closePath(); ctx.fill();
+    ctx.fillStyle = '#4a4a4a'; ctx.fillRect(60,-12,32,8);
+    ctx.fillStyle = '#6b4a3a'; ctx.fillRect(-36,10,28,24);
+    ctx.fillStyle = '#909090'; ctx.fillRect(-10,-10,14,6);
+    ctx.restore();
+  }
+
+  // ---------- Render world ----------
+  function renderAll(){
+    ctx.fillStyle = '#5a5a66'; ctx.fillRect(0,0,W,H/2);
+    ctx.fillStyle = '#0d0d0d'; ctx.fillRect(0,H/2,W,H/2);
+    const planeDist = (W/2) / Math.tan(HALF_FOV);
+    const colW = W / rays;
+    const baseCols = ['#9a9a9a','#7c5c3c','#5c7c3c','#5c5c7c'];
+    for (let r=0;r<rays;r++){
+      const cameraX = (2 * r / rays) - 1;
+      const rayA = player.ang + Math.atan(cameraX * Math.tan(HALF_FOV));
+      const res = castSingleRay(player.x, player.y, rayA);
+      const corrected = res.dist * Math.cos(rayA - player.ang);
+      const h = Math.min(H*2, (TILE * planeDist) / Math.max(0.0001, corrected));
+      const drawStart = Math.floor((H/2) - h/2);
+      const idx = (Math.floor(r * 0.03) % baseCols.length + baseCols.length) % baseCols.length;
+      const shade = Math.max(0.16, 1 - (corrected / 1600));
+      ctx.fillStyle = shadeColor(baseCols[idx], shade);
+      ctx.fillRect(r*colW, drawStart, colW+0.9, Math.max(1, Math.floor(h)));
+      if (res.hitExit) { ctx.fillStyle = 'rgba(110,255,120,0.06)'; ctx.fillRect(r*colW, drawStart, colW+0.9, Math.max(1, Math.floor(h))); }
+    }
+
+    const sprites = [];
+    const plane = planeDist;
+    for (let e of enemies){
+      if (!e.alive) continue;
+      const dx = e.x - player.x, dy = e.y - player.y;
+      const dist = Math.hypot(dx,dy); const angTo = Math.atan2(dy,dx);
+      let rel = angTo - player.ang; rel = ((rel + Math.PI)%(2*Math.PI)) - Math.PI;
+      if (Math.abs(rel) > HALF_FOV + 0.6) continue;
+      if (!hasLineOfSight(player.x,player.y,e.x,e.y)) continue;
+      const screenX = (0.5 * (1 + Math.tan(rel)/Math.tan(HALF_FOV))) * W;
+      const scale = Math.min(1.8, (TILE * plane) / Math.max(1, dist));
+      const size = Math.max(8, scale * 44);
+      sprites.push({ e, dist, screenX, size });
+    }
+    sprites.sort((a,b)=>b.dist - a.dist);
+    for (let s of sprites){
+      const e = s.e; const x = s.screenX - s.size/2, y = H/2 - s.size/2;
+      ctx.fillStyle = '#c33'; ctx.fillRect(x,y,s.size,s.size);
+      const pct = Math.max(0, Math.min(1, e.hp/100));
+      ctx.fillStyle = '#0f0'; ctx.fillRect(x, y-6, s.size*pct, 4);
+      ctx.fillStyle = '#330'; ctx.fillRect(x + s.size*pct, y-6, s.size*(1-pct), 4);
+    }
+
+    for (let b of enemyBullets){ const sx = projectToScreenX(b.x,b.y); if (sx !== null){ ctx.fillStyle = '#ffddaa'; ctx.fillRect(sx-2, H/2-2, 4,4); } }
+    for (let b of playerBullets){ const sx = projectToScreenX(b.x,b.y); if (sx !== null){ ctx.fillStyle = '#ffeeaa'; ctx.fillRect(sx-2, H/2-2, 4,4); } }
+    for (let p of particles){ const sx = projectToScreenX(p.x,p.y); if (sx !== null){ const alpha = Math.max(0, p.life / PARTICLE_LIFE); ctx.globalAlpha = alpha; ctx.fillStyle = p.color || '#ffd'; ctx.fillRect(sx - p.size, H/2 - p.size, p.size*2, p.size*2); ctx.globalAlpha = 1; } }
+
+    ctx.fillStyle = 'rgba(0,0,0,0.6)'; ctx.fillRect(W/2 - 1, H/2 - 12, 2, 24); ctx.fillRect(W/2 - 12, H/2 - 1, 24, 2);
+
+    drawMiniMap();
+  }
+
+  // ---------- Main loop ----------
+  let last = performance.now();
+  function mainLoop(now){
+    const dt = Math.min(0.05, (now - last)/1000); last = now;
+    const speed = 150 * dt;
+    const cos = Math.cos(player.ang), sin = Math.sin(player.ang);
+    let moving = false;
+    if (keys['KeyW']){ tryMovePlayer(cos*speed, sin*speed); moving = true; }
+    if (keys['KeyS']){ tryMovePlayer(-cos*speed, -sin*speed); moving = true; }
+    if (keys['KeyA']){ tryMovePlayer(-sin*speed, cos*speed); moving = true; }
+    if (keys['KeyD']){ tryMovePlayer(sin*speed, -cos*speed); moving = true; }
+    if (keys['ArrowLeft']) player.ang -= 2.6 * dt;
+    if (keys['ArrowRight']) player.ang += 2.6 * dt;
+    if (touchMove.active){
+      const jx = touchMove.x, jy = -touchMove.y;
+      const mag = Math.hypot(jx, jy);
+      if (mag > 0.08){
+        const joyAng = Math.atan2(jy, jx) + player.ang;
+        const sp = speed * Math.min(1, mag * 1.2);
+        tryMovePlayer(Math.cos(joyAng)*sp, Math.sin(joyAng)*sp); moving = true;
+      }
+    }
+    player.moving = moving;
+    if (keys['Space'] && !keys._spacePrev) playerFire();
+    keys._spacePrev = !!keys['Space'];
+    if (player.reloading && performance.now() >= reloadEndAt){ player.reloading = false; player.ammo = MAX_AMMO; updateHUD(); }
+    updateEnemies(dt); updateBullets(dt); updateParticles(dt);
+    if (player.moving) player.bob += dt * 9; else player.bob = Math.max(0, player.bob - dt * 8);
+    if (flashTimer > 0){ flashTimer -= dt; if (flashTimer <= 0) flashEl.style.background = 'rgba(255,0,0,0)'; }
+    if (isExitTileWorld(player.x, player.y)) { loadLevel(currentLevel + 1); }
+    if (player.hp <= 0) { loadLevel(currentLevel); }
+    renderAll(); renderWeapon(); renderFace(); updateHUD();
+    requestAnimationFrame(mainLoop);
+  }
+
+  // ---------- Weapon ----------
+  function renderWeapon(){
+    const cx = W/2, cy = H/2;
+    const bobOffset = player.moving ? Math.sin(player.bob) * 6 : 0;
+    ctx.save();
+    ctx.translate(cx, cy + 140 + bobOffset);
+    ctx.fillStyle = '#2b2b2b'; ctx.beginPath(); ctx.moveTo(-40,-20); ctx.lineTo(60,-20); ctx.lineTo(60,10); ctx.lineTo(-40,10); ctx.closePath(); ctx.fill();
+    ctx.fillStyle = '#4a4a4a'; ctx.fillRect(60,-12,32,8);
+    ctx.fillStyle = '#6b4a3a'; ctx.fillRect(-36,10,28,24);
+    ctx.fillStyle = '#909090'; ctx.fillRect(-10,-10,14,6);
+    ctx.restore();
+  }
+
+  // ---------- Big overlay scheduling ----------
+  function scheduleBigMessage(text, delay=10000, duration=3000){
+    if (!bigOverlay) return;
+    bigOverlayText.textContent = text;
+    setTimeout(()=>{ bigOverlay.classList.add('show'); bigOverlay.setAttribute('aria-hidden','false');
+      setTimeout(()=>{ bigOverlay.classList.remove('show'); bigOverlay.setAttribute('aria-hidden','true'); }, duration);
+    }, delay);
+  }
+
+  // ---------- Start ----------
+  function startGame(){
+    setPool(false); // ORIGINAL pool by default
+    scheduleBigMessage('hi Darren', 10000, 3000);
+    updateHUD();
+    requestAnimationFrame(mainLoop);
+  }
+  startGame();
+
+  // ---------- Expose debug ----------
+  window.__mini = { player, enemies, ORIGINAL_LEVELS, FIXED_LEVELS, loadLevel, setPool };
+
+})();
+</script>
+</body>
+</html>
