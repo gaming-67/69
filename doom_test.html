@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Mini Doom test</title>
+<style>
+html,body{margin:0;height:100%;overflow:hidden;background:#000}
+canvas{display:block;width:100vw;height:100vh}
+#map{position:fixed;top:10px;right:10px;border:2px solid #fff}
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<canvas id="map" width="128" height="128"></canvas>
+
+<script>
+const g = document.getElementById("game");
+const ctx = g.getContext("2d",{alpha:false});
+const m = document.getElementById("map");
+const mctx = m.getContext("2d");
+let W,H;
+function resize(){W=window.innerWidth;H=window.innerHeight;g.width=W;g.height=H;}
+window.addEventListener("resize",resize);resize();
+
+const MAP=[
+"################",
+"#..............#",
+"#..##....##....#",
+"#..............#",
+"#..####..####..#",
+"#..............#",
+"#..##....##....#",
+"#..............#",
+"################"
+];
+const TILE=64, MW=MAP[0].length, MH=MAP.length;
+const player={x:3*TILE,y:3*TILE,a:0};
+const keys={};
+window.addEventListener("keydown",e=>keys[e.code]=true);
+window.addEventListener("keyup",e=>keys[e.code]=false);
+
+function isWall(x,y){
+  const mx=Math.floor(x/TILE),my=Math.floor(y/TILE);
+  if(mx<0||my<0||mx>=MW||my>=MH) return true;
+  return MAP[my][mx]==="#";
+}
+
+function patternColor(x,y){
+  // simple retro stripes based on wall type and distance
+  const c=(Math.floor(x/4)%2===0)?"#777":"#555";
+  return c;
+}
+
+const FOV=Math.PI/3, HALF=FOV/2, RAYS=240;
+function render(){
+  // floor/ceiling
+  ctx.fillStyle="#222";ctx.fillRect(0,0,W,H/2);
+  ctx.fillStyle="#000";ctx.fillRect(0,H/2,W,H/2);
+  const step=FOV/RAYS,plane=(W/2)/Math.tan(HALF);
+  for(let r=0;r<RAYS;r++){
+    const ra=player.a-HALF+r*step;
+    const sin=Math.sin(ra),cos=Math.cos(ra);
+    let dist=0,hit=false;
+    while(!hit&&dist<1024){
+      dist+=4;
+      const x=player.x+cos*dist;
+      const y=player.y+sin*dist;
+      if(isWall(x,y)) hit=true;
+    }
+    const d=dist*Math.cos(ra-player.a);
+    const h=(TILE*plane)/d;
+    const shade=Math.max(0.3,1-d/800);
+    ctx.fillStyle=patternColor(r*4,d);
+    ctx.globalAlpha=shade;
+    const colW=W/RAYS;
+    ctx.fillRect(r*colW,(H-h)/2,colW+1,h);
+  }
+  ctx.globalAlpha=1;
+}
+
+function drawMini(){
+  mctx.clearRect(0,0,128,128);
+  const s=128/MW;
+  for(let y=0;y<MH;y++)
+    for(let x=0;x<MW;x++){
+      mctx.fillStyle=MAP[y][x]==="#"?"#888":"#111";
+      mctx.fillRect(x*s,y*s,s,s);
+    }
+  mctx.fillStyle="#0f0";
+  mctx.beginPath();
+  mctx.arc(player.x/TILE*s,player.y/TILE*s,3,0,Math.PI*2);
+  mctx.fill();
+}
+
+function loop(t){
+  const spd=120/60;
+  if(keys["KeyA"]) player.a-=0.05;
+  if(keys["KeyD"]) player.a+=0.05;
+  const dx=Math.cos(player.a)*spd,dy=Math.sin(player.a)*spd;
+  if(keys["KeyW"]&&!isWall(player.x+dx,player.y+dy)){player.x+=dx;player.y+=dy;}
+  if(keys["KeyS"]&&!isWall(player.x-dx,player.y-dy)){player.x-=dx;player.y-=dy;}
+  render();
+  drawMini();
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
